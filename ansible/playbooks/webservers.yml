@@ -9,10 +9,11 @@
   hosts: web-server-01
   become: true
   tasks:
-    - name: Add nginx signing key (DEPRECATED MODULE)
-      ansible.builtin.apt_key:
+    - name: Add nginx signing key (modern)
+      ansible.builtin.get_url:
         url: https://nginx.org/keys/nginx_signing.key
-        state: present
+        dest: /usr/share/keyrings/nginx-archive-keyring.gpg
+        mode: '0644'
 
     - name: Ensure nginx is installed
       ansible.builtin.apt:
