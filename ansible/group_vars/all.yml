@@ -7,6 +7,5 @@
 ansible_python_interpreter: /usr/bin/python3
 env: production
 log_level: info
-nginx_port: 80
 
 # (nginx_port is intentionally omitted — see scenarios/missing_var.py)
