@@ -50,6 +50,29 @@ def _load_yaml(path: Path) -> dict:
         return yaml.safe_load(fh) or {}
 
 
+def _expand_playbook(playbook_path: Path) -> list[dict]:
+    """Walk a playbook file and expand ``import_playbook`` directives.
+
+    Returns a flat list of play dicts (each one already has ``hosts:`` etc.).
+    Each returned play is annotated with its source playbook so failures can be
+    attributed to the right file.
+    """
+    raw = _load_yaml(playbook_path)
+    if not isinstance(raw, list):
+        raw = [raw]
+
+    expanded: list[dict] = []
+    for entry in raw:
+        if isinstance(entry, dict) and "import_playbook" in entry:
+            sub_path = playbook_path.parent / entry["import_playbook"]
+            for sub in _expand_playbook(sub_path):
+                expanded.append(sub)
+        elif isinstance(entry, dict):
+            entry["_source_playbook"] = str(playbook_path.relative_to(REPO_ROOT))
+            expanded.append(entry)
+    return expanded
+
+
 def _hosts_in_inventory(inv: dict, pattern: str) -> list[str]:
     """Return the list of concrete host names matching an Ansible hosts pattern.
 
@@ -128,26 +151,105 @@ def _collect_template_vars(task: dict) -> list[str]:
 
 
 def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
-    """Execute the mock playbook and return a RunResult."""
+    """Execute the mock playbook and return a RunResult.
+
+    Two-phase execution (mirrors real ansible-playbook):
+      Phase A — parse-time validation:
+        Walk all plays + tasks. Emit failures for removed modules and
+        undefined-variable refs that can be detected statically.
+      Phase B — runtime execution:
+        For each play, resolve its host pattern against the inventory. If the
+        pattern matches no host, emit an UNREACHABLE failure. Otherwise, run
+        each task; if no parse-time failure was recorded for it, mark its hosts
+        as succeeded.
+    """
     run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
     log_path = RUNS_DIR / f"run-{run_id}.log"
     failures: list[dict] = []
     succeeded: list[str] = []
 
     inv = _load_yaml(REPO_ROOT / "ansible" / "inventory.yml")
-    group_vars = _load_yaml(REPO_ROOT / "ansible" / "group_vars" / "all.yml")
-    playbook = _load_yaml(playbook_path)
+    group_vars = _load_yaml(REPO_ROOT / "ansible" / "group_vars" / "all.yml") or {}
+    playbook = _expand_playbook(playbook_path)
 
     log_lines: list[str] = []
     log_lines.append(f"PLAYBOOK: {playbook_path.name} ***********************************")
     log_lines.append(f"PLAY [configure stack] : started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
     log_lines.append("")
+    log_lines.append("PHASE A: Parse-time validation")
+    log_lines.append("")
 
     rc = 0
 
+    # ── Phase A: parse-time validation ──────────────────────────────────────
+    parse_failures_by_task: dict[tuple[str, str], list[dict]] = {}
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
+        play_source = play.get("_source_playbook", str(playbook_path.relative_to(REPO_ROOT)))
+        tasks = play.get("tasks", [])
+
+        for task in tasks:
+            task_name = task.get("name", "<unnamed task>")
+            key = (play_source, task_name)
+
+            # Removed-module check
+            removed_err = _check_removed_modules(task)
+            if removed_err:
+                rc = 2
+                f = {
+                    "type": "removed_module",
+                    "host": target,
+                    "module": next(
+                        (k for k in task if k.split(".")[-1] in {"apt_key", "docker"}),
+                        "unknown"
+                    ),
+                    "message": removed_err,
+                    "playbook": play_source,
+                    "play": play_name,
+                    "task": task_name,
+                }
+                failures.append(f)
+                parse_failures_by_task.setdefault(key, []).append(f)
+                log_lines.append(
+                    f"ERROR! couldn't resolve module action '{f['module']}'. "
+                    f"The module was removed in ansible-core 2.18."
+                )
+                continue
+
+            # Undefined-var check (template vars)
+            refs = _collect_template_vars(task)
+            undefined = [r for r in refs if r not in group_vars]
+            if undefined:
+                rc = 2
+                var = undefined[0]
+                f = {
+                    "type": "undefined_variable",
+                    "host": target,
+                    "variable": var,
+                    "message": (
+                        f"The task includes an option with an undefined variable '{var}'. "
+                        f"The error was: 'dict object' has no attribute '{var}'"
+                    ),
+                    "playbook": play_source,
+                    "play": play_name,
+                    "task": task_name,
+                }
+                failures.append(f)
+                parse_failures_by_task.setdefault(key, []).append(f)
+                log_lines.append(
+                    f"ERROR! undefined variable '{var}' referenced in task '{task_name}'."
+                )
+
+    log_lines.append("")
+    log_lines.append("PHASE B: Runtime execution")
+    log_lines.append("")
+
+    # ── Phase B: runtime execution ──────────────────────────────────────────
+    for play in playbook:
+        target = play.get("hosts", "all")
+        play_name = play.get("name", "<unnamed play>")
+        play_source = play.get("_source_playbook", str(playbook_path.relative_to(REPO_ROOT)))
         tasks = play.get("tasks", [])
 
         hosts = _hosts_in_inventory(inv, target)
@@ -156,7 +258,7 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
         log_lines.append(f"TASK [target hosts pattern '{target}'] resolved to {len(hosts)} host(s)")
 
         if not hosts:
-            # Hostname doesn't exist in inventory — emit Ansible's UNREACHABLE
+            # Hostname doesn't exist in inventory — emit UNREACHABLE
             rc = 2
             fake_host = target if not target.startswith(("all", "*")) else "<unknown>"
             failures.append({
@@ -165,7 +267,7 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
                 "pattern": target,
                 "message": f"UNREACHABLE! fatal: [{fake_host}]: UNREACHABLE! "
                            f"Host '{fake_host}' not found in inventory.",
-                "playbook": str(playbook_path.relative_to(REPO_ROOT)),
+                "playbook": play_source,
                 "play": play_name,
             })
             log_lines.append(
@@ -179,60 +281,13 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
         for task in tasks:
             task_name = task.get("name", "<unnamed task>")
             log_lines.append(f"TASK [{task_name}] *****************************************")
-
-            # 1) Removed-module check
-            removed_err = _check_removed_modules(task)
-            if removed_err:
-                rc = 2
-                for h in hosts:
-                    failures.append({
-                        "type": "removed_module",
-                        "host": h,
-                        "module": next(
-                            (k for k in task if k.split(".")[-1] in {"apt_key", "docker"}),
-                            "unknown"
-                        ),
-                        "message": removed_err,
-                        "playbook": str(playbook_path.relative_to(REPO_ROOT)),
-                        "play": play_name,
-                        "task": task_name,
-                    })
-                    log_lines.append(
-                        f"fatal: [{h}]: FAILED! => {removed_err}"
-                    )
-                log_lines.append(
-                    "ERROR! couldn't resolve module action 'apt_key'. "
-                    "The module was removed in ansible-core 2.18."
-                )
+            key = (play_source, task_name)
+            if key in parse_failures_by_task:
+                for f in parse_failures_by_task[key]:
+                    log_lines.append(f"fatal: [{f.get('host', '?')}]: FAILED! => {f['message']}")
                 continue
 
-            # 2) Undefined-var check (template vars)
-            refs = _collect_template_vars(task)
-            undefined = [r for r in refs if r not in (group_vars or {})]
-            if undefined:
-                rc = 2
-                for h in hosts:
-                    var = undefined[0]
-                    failures.append({
-                        "type": "undefined_variable",
-                        "host": h,
-                        "variable": var,
-                        "message": (
-                            f"The task includes an option with an undefined variable '{var}'. "
-                            f"The error was: 'dict object' has no attribute '{var}'"
-                        ),
-                        "playbook": str(playbook_path.relative_to(REPO_ROOT)),
-                        "play": play_name,
-                        "task": task_name,
-                    })
-                    log_lines.append(
-                        f"fatal: [{h}]: FAILED! => msg=\"The task includes an option "
-                        f"with an undefined variable '{var}'. "
-                        f"The error was: 'dict object' has no attribute '{var}'\""
-                    )
-                continue
-
-            # 3) Success path
+            # Success path
             for h in hosts:
                 if h not in succeeded:
                     succeeded.append(h)
@@ -241,9 +296,7 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
 
         log_lines.append(
             f"PLAY RECAP: " + "  ".join(
-                f"{h} : ok={len([f for f in failures if f['host'] != h])}  "
-                f"changed=0  unreachable=0  failed={len([f for f in failures if f['host'] == h])}"
-                for h in hosts
+                f"{h} : ok=1  changed=0  unreachable=0  failed=0" for h in hosts
             )
         )
         log_lines.append("")
