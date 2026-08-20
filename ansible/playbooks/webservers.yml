@@ -9,11 +9,10 @@
   hosts: web-server-01                # <-- stale hostname
   become: true
   tasks:
-    - name: Add nginx signing key (modern)
-      ansible.builtin.get_url:
+    - name: Add nginx signing key (DEPRECATED MODULE)
+      ansible.builtin.apt_key:        # <-- removed module
         url: https://nginx.org/keys/nginx_signing.key
-        dest: /usr/share/keyrings/nginx-archive-keyring.gpg
-        mode: '0644'
+        state: present
 
     - name: Ensure nginx is installed
       ansible.builtin.apt:
