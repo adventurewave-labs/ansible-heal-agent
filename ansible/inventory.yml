@@ -7,7 +7,7 @@ all:
   children:
     webservers:
       hosts:
-        web-01:                     # <-- stale; playbook expects web-server-01
+        web-server-01:                     # <-- renamed to match playbook expectations
           ansible_host: 10.0.1.21
           ansible_user: ubuntu
         web-02:
