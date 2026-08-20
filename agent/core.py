@@ -102,7 +102,31 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
             except patcher.PatchError as e:
                 if transcript:
                     transcript.patch_failed(fix, str(e))
-                continue
+                # If the LLM produced a malformed patch, retry once with the
+                # deterministic fallback — it produces patches that are
+                # guaranteed to match the baseline.
+                if use_llm and "_fallback_reason" not in diag:
+                    fb_diag = diagnoser.fallback_diagnose(failure)
+                    fb_diag["_fallback_reason"] = (
+                        f"LLM patch failed validation: {e}"
+                    )
+                    rec.diagnoses.append(fb_diag)
+                    if transcript:
+                        transcript.diagnosis(failure, fb_diag)
+                    fb_fix = fb_diag.get("fix", {})
+                    try:
+                        patch = patcher.apply_fix(fb_fix)
+                        rec.patches.append(patch)
+                        if transcript:
+                            transcript.patch_applied(fb_fix, patch)
+                        fix = fb_fix
+                        diag = fb_diag
+                    except patcher.PatchError as e2:
+                        if transcript:
+                            transcript.patch_failed(fb_fix, str(e2))
+                        continue
+                else:
+                    continue
 
             sha = committer.commit_fix(fix, diag)
             rec.commits.append(sha)

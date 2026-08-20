@@ -9,4 +9,3 @@ env: production
 log_level: info
 
 # (nginx_port is intentionally omitted — see scenarios/missing_var.py)
-nginx_port: 80
