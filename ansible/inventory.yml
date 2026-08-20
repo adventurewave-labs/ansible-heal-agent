@@ -1,0 +1,20 @@
+---
+# Ansible inventory for the demo web+db stack.
+# NOTE: this file is intentionally seeded with a STALE hostname so the agent has
+# something to heal. See scenarios/hostname_change.py for the seed.
+
+all:
+  children:
+    webservers:
+      hosts:
+        web-01:                     # <-- stale; playbook expects web-server-01
+          ansible_host: 10.0.1.21
+          ansible_user: ubuntu
+        web-02:
+          ansible_host: 10.0.1.22
+          ansible_user: ubuntu
+    dbservers:
+      hosts:
+        db-01:
+          ansible_host: 10.0.2.11
+          ansible_user: postgres
