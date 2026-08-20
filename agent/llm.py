@@ -44,17 +44,11 @@ def chat(prompt: str, system: Optional[str] = None, max_retries: int = 2) -> str
         raise LLMError("z-ai CLI not found on PATH. Install z-ai-web-dev-sdk "
                         "or set PIPELINE_RUNNER=mock to use the rule-based fallback.")
 
-    # Write the prompt to a file to avoid shell-escaping pitfalls on long prompts.
-    prompt_file = _TMP_DIR / f"prompt-{int(time.time()*1000)}.txt"
-    prompt_file.write_text(prompt)
-
     out_file = _TMP_DIR / f"resp-{int(time.time()*1000)}.json"
 
-    cmd = ["z-ai", "chat", "--prompt", str(prompt_file), "--output", str(out_file)]
+    cmd = ["z-ai", "chat", "--prompt", prompt, "--output", str(out_file)]
     if system:
-        sys_file = _TMP_DIR / f"sys-{int(time.time()*1000)}.txt"
-        sys_file.write_text(system)
-        cmd += ["--system", str(sys_file)]
+        cmd += ["--system", system]
 
     last_err: Optional[str] = None
     for attempt in range(1, max_retries + 1):
