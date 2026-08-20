@@ -57,6 +57,8 @@ def _expand_playbook(playbook_path: Path) -> list[dict]:
     Each returned play is annotated with its source playbook so failures can be
     attributed to the right file.
     """
+    # Resolve to absolute so relative_to(REPO_ROOT) works regardless of cwd.
+    playbook_path = playbook_path.resolve()
     raw = _load_yaml(playbook_path)
     if not isinstance(raw, list):
         raw = [raw]
@@ -168,6 +170,8 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
     failures: list[dict] = []
     succeeded: list[str] = []
 
+    # Resolve playbook_path to absolute so relative_to(REPO_ROOT) works from any cwd.
+    playbook_path = playbook_path.resolve()
     inv = _load_yaml(REPO_ROOT / "ansible" / "inventory.yml")
     group_vars = _load_yaml(REPO_ROOT / "ansible" / "group_vars" / "all.yml") or {}
     playbook = _expand_playbook(playbook_path)

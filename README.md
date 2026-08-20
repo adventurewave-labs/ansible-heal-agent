@@ -8,6 +8,15 @@ The project demonstrates how LLM-driven autonomous agents can be paired with exi
 Ansible infrastructure to reduce on-call toil and MTTR for routine, well-understood
 failure classes (stale hostname, renamed module, missing variable, etc.).
 
+<p align="center">
+  <img src="docs/demo.gif" alt="ansible-heal-agent demo: agent heals a broken baseline in 7 seconds" width="800">
+</p>
+
+<p align="center">
+  <em>The agent heals all 3 seeded failures (stale hostname, removed <code>apt_key</code> module, undefined <code>nginx_port</code> var) and lands 3 conventional commits in 7 seconds end-to-end.</em>
+</p>
+
+
 ```
                 ┌──────────────────────────────────────────────────────────┐
                 │                     Pipeline (mock)                     │
