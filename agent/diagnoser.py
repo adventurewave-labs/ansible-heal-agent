@@ -112,7 +112,7 @@ def fallback_diagnose(failure: dict) -> dict[str, Any]:
                 "target_file": "ansible/playbooks/webservers.yml",
                 "search": (
                     "    - name: Add nginx signing key (DEPRECATED MODULE)\n"
-                    "      ansible.builtin.apt_key:        # <-- removed module\n"
+                    "      ansible.builtin.apt_key:\n"
                     "        url: https://nginx.org/keys/nginx_signing.key\n"
                     "        state: present\n"
                 ),

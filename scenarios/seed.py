@@ -60,11 +60,11 @@ WEBSERVERS_BROKEN = """\
 #   3. References undefined var `nginx_port`
 
 - name: Configure webservers
-  hosts: web-server-01                # <-- stale hostname
+  hosts: web-server-01
   become: true
   tasks:
     - name: Add nginx signing key (DEPRECATED MODULE)
-      ansible.builtin.apt_key:        # <-- removed module
+      ansible.builtin.apt_key:
         url: https://nginx.org/keys/nginx_signing.key
         state: present
 
@@ -78,7 +78,7 @@ WEBSERVERS_BROKEN = """\
         src: nginx.conf.j2
         dest: /etc/nginx/sites-available/default
         vars:
-          listen_port: "{{ nginx_port }}"   # <-- undefined var
+          listen_port: "{{ nginx_port }}"
       notify: reload nginx
 
   handlers:
