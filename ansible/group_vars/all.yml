@@ -8,5 +8,4 @@ ansible_python_interpreter: /usr/bin/python3
 env: production
 log_level: info
 
-# Added by ansible-heal-agent
-nginx_port: 8080
+# (nginx_port is intentionally omitted — see scenarios/missing_var.py)
