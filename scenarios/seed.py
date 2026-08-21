@@ -2,17 +2,16 @@
 
 The "broken" baseline is the canonical initial state of the ansible/ tree
 before the agent runs. ``reset_to_baseline()`` writes that state from scratch
-to disk and commits it, so each demo / test run starts from a clean,
-deterministic broken state — independent of what previous runs may have
-committed.
+to disk, so each demo / test run starts from a clean, deterministic broken
+state — independent of what previous runs may have done.
 """
 
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
-from pipeline.git_helper import REPO_ROOT, init_if_needed
+from agent.config import repo_root
+from pipeline.git_helper import init_if_needed
 
 INVENTORY_BROKEN = """\
 ---
@@ -48,7 +47,7 @@ ansible_python_interpreter: /usr/bin/python3
 env: production
 log_level: info
 
-# (nginx_port is intentionally omitted — see scenarios/missing_var.py)
+# (nginx_port is intentionally omitted — see scenarios/seed.py)
 """
 
 WEBSERVERS_BROKEN = """\
@@ -118,8 +117,13 @@ SITE_PLAYBOOK = """\
 """
 
 
-def reset_to_baseline() -> None:
-    """Write the canonical broken baseline to disk and commit it."""
+def reset_to_baseline(commit: bool = False) -> None:
+    """Write the canonical broken baseline to the target repo's ``ansible/`` tree.
+
+    ``commit`` is opt-in and defaults to False: resetting the fixture tree must
+    never add commits to the caller's branch as a side effect. The demo passes
+    ``commit=True`` so its ``git log`` starts from a clean marker.
+    """
     init_if_needed()
 
     files = {
@@ -130,25 +134,27 @@ def reset_to_baseline() -> None:
         "ansible/playbooks/site.yml": SITE_PLAYBOOK,
     }
     for rel, content in files.items():
-        path = REPO_ROOT / rel
+        path = repo_root() / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
 
     # Clear any previous pipeline run logs so the demo starts clean.
-    runs_dir = REPO_ROOT / "pipeline" / "runs"
+    runs_dir = repo_root() / "pipeline" / "runs"
     if runs_dir.exists():
         for f in runs_dir.glob("run-*.log"):
             f.unlink()
         for f in runs_dir.glob("run-*.json"):
             f.unlink()
 
-    # Commit the baseline so git log shows a clean starting point.
-    subprocess.run(["git", "add", "-A"], cwd=REPO_ROOT, check=False, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "chore: reset to broken baseline",
-         "--allow-empty"],
-        cwd=REPO_ROOT, check=False, capture_output=True,
-    )
+    # Committing is OPT-IN. Library and test callers must never add commits to
+    # the caller's branch as a side effect of resetting the fixture tree.
+    if commit:
+        subprocess.run(["git", "add", "-A"], cwd=repo_root(),
+                       check=False, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "chore: reset to broken baseline"],
+            cwd=repo_root(), check=False, capture_output=True,
+        )
 
 
 if __name__ == "__main__":

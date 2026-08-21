@@ -16,3 +16,4 @@ pipeline/runs/*.json
 .ansible-heal/
 *.tmp
 .DS_Store
+.demo-workspace/

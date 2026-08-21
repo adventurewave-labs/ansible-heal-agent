@@ -5,7 +5,7 @@ version = "0.1.0"
 description = "Autonomous agent that scans Ansible logs, diagnoses failures, patches playbooks, commits, and re-runs the pipeline."
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "Platform Reliability Team" }]
+authors = [{ name = "Marcus Patman" }]
 license = { text = "MIT" }
 
 dependencies = [
@@ -30,6 +30,17 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["agent*", "pipeline*", "scenarios*"]
 
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
+
+[tool.coverage.run]
+branch = true
+omit = ["tests/*"]
