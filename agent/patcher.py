@@ -1,7 +1,16 @@
 """Patcher — apply a diagnosis's fix to the target repository.
 
-Supports a single action: ``edit_file`` (bounded string replace). The action
-contract is intentionally tiny so the LLM has only one thing to propose.
+Four actions:
+
+``edit_file``      bounded string replace (what an LLM proposes)
+``set_yaml_key``   add a top-level key to a YAML document
+``rename_host``    rename a host in an inventory
+``replace_module`` swap a module in every task that uses it
+
+The last three are *structural*: they edit the parsed document via
+``agent.yaml_edit`` and re-serialise, so they work on any file with the right
+shape instead of requiring a literal anchor string to be present. That is what
+lets the deterministic diagnoser handle a variable it has never seen.
 
 Three gates run before anything is written, in this order:
 
@@ -24,6 +33,7 @@ from typing import Any
 
 import yaml
 
+from agent import yaml_edit
 from agent.config import ConfigError, allowed_paths, is_path_allowed, repo_root, resolve_in_repo
 
 
@@ -65,7 +75,7 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
         return {"target_file": None, "diff": "", "ok": True,
                 "applied": False, "note": "no-op fix"}
 
-    if action != "edit_file":
+    if action not in ACTIONS:
         raise PatchError(f"Unknown action: {action}")
 
     target_rel = fix.get("target_file")
@@ -86,19 +96,10 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
         raise PatchError(f"target_file does not exist: {target_rel}")
 
     original = target.read_text()
-    search = fix.get("search")
-    replace = fix.get("replace")
-    if search is None or replace is None:
-        raise PatchError("edit_file fix requires both 'search' and 'replace'")
+    patched = ACTIONS[action](original, fix, target_rel)
 
-    if search not in original:
-        raise PatchError(
-            f"search substring not found in {target_rel}. "
-            f"The file may already be patched, or the proposed anchor is wrong."
-        )
-
-    occurrences = original.count(search)
-    patched = original.replace(search, replace, 1)
+    if patched == original:
+        raise PatchError(f"{action} on {target_rel} would change nothing")
 
     # Gate 3: the result must still be parseable. Raising here means nothing
     # was written, so the tree is untouched and the caller can fall back.
@@ -109,14 +110,65 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
 
     return {
         "target_file": target_rel,
-        "occurrences_found": occurrences,
-        "before_lines": search.count("\n") + 1,
-        "after_lines": replace.count("\n") + 1,
+        "action": action,
         "ok": True,
         "applied": not dry_run,
         "dry_run": dry_run,
         "diff": unified_diff(original, patched, target_rel),
     }
+
+
+# ── actions ────────────────────────────────────────────────────────
+
+def _act_edit_file(original: str, fix: dict, target_rel: str) -> str:
+    search = fix.get("search")
+    replace = fix.get("replace")
+    if search is None or replace is None:
+        raise PatchError("edit_file fix requires both 'search' and 'replace'")
+    if search not in original:
+        raise PatchError(
+            f"search substring not found in {target_rel}. "
+            f"The file may already be patched, or the proposed anchor is wrong."
+        )
+    return original.replace(search, replace, 1)
+
+
+def _act_set_yaml_key(original: str, fix: dict, target_rel: str) -> str:
+    key = fix.get("key")
+    if not key:
+        raise PatchError("set_yaml_key fix requires 'key'")
+    try:
+        return yaml_edit.set_key(original, key, fix.get("value", ""))
+    except yaml_edit.YamlEditError as e:
+        raise PatchError(f"{target_rel}: {e}") from e
+
+
+def _act_rename_host(original: str, fix: dict, target_rel: str) -> str:
+    old, new = fix.get("old"), fix.get("new")
+    if not old or not new:
+        raise PatchError("rename_host fix requires 'old' and 'new'")
+    try:
+        return yaml_edit.rename_host(original, old, new)
+    except yaml_edit.YamlEditError as e:
+        raise PatchError(f"{target_rel}: {e}") from e
+
+
+def _act_replace_module(original: str, fix: dict, target_rel: str) -> str:
+    old, new = fix.get("old_module"), fix.get("new_module")
+    if not old or not new:
+        raise PatchError("replace_module fix requires 'old_module' and 'new_module'")
+    try:
+        return yaml_edit.replace_module(original, old, new, fix.get("new_args"))
+    except yaml_edit.YamlEditError as e:
+        raise PatchError(f"{target_rel}: {e}") from e
+
+
+ACTIONS = {
+    "edit_file": _act_edit_file,
+    "set_yaml_key": _act_set_yaml_key,
+    "rename_host": _act_rename_host,
+    "replace_module": _act_replace_module,
+}
 
 
 def unified_diff(before: str, after: str, path: str = "") -> str:
