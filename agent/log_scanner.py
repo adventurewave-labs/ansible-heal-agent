@@ -26,8 +26,8 @@ def extract_failures(log_path: str | Path) -> list[dict[str, Any]]:
     log_path = Path(log_path)
     if not log_path.is_absolute():
         # Resolve relative to repo root.
-        from pipeline.git_helper import REPO_ROOT
-        log_path = REPO_ROOT / log_path
+        from agent.config import repo_root
+        log_path = repo_root() / log_path
     text = log_path.read_text()
     failures: list[dict[str, Any]] = []
 
