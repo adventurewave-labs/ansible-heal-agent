@@ -21,20 +21,16 @@ from __future__ import annotations
 
 import os
 import re
-import sys
-import time
-import json
 import shutil
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-RUNS_DIR = REPO_ROOT / "pipeline" / "runs"
-RUNS_DIR.mkdir(parents=True, exist_ok=True)
+from agent.config import repo_root, runs_dir
 
 
 @dataclass
@@ -57,7 +53,7 @@ def _expand_playbook(playbook_path: Path) -> list[dict]:
     Each returned play is annotated with its source playbook so failures can be
     attributed to the right file.
     """
-    # Resolve to absolute so relative_to(REPO_ROOT) works regardless of cwd.
+    # Resolve to absolute so relative_to(repo_root()) works regardless of cwd.
     playbook_path = playbook_path.resolve()
     raw = _load_yaml(playbook_path)
     if not isinstance(raw, list):
@@ -70,7 +66,7 @@ def _expand_playbook(playbook_path: Path) -> list[dict]:
             for sub in _expand_playbook(sub_path):
                 expanded.append(sub)
         elif isinstance(entry, dict):
-            entry["_source_playbook"] = str(playbook_path.relative_to(REPO_ROOT))
+            entry["_source_playbook"] = str(playbook_path.relative_to(repo_root()))
             expanded.append(entry)
     return expanded
 
@@ -126,7 +122,7 @@ def _hosts_in_inventory(inv: dict, pattern: str) -> list[str]:
     return []  # pattern matched nothing → unreachable
 
 
-def _check_removed_modules(task: dict) -> Optional[str]:
+def _check_removed_modules(task: dict) -> str | None:
     """Return error string if the task uses a removed module."""
     REMOVED = {
         "apt_key": "The 'apt_key' module was removed in ansible-core 2.18. "
@@ -152,7 +148,7 @@ def _collect_template_vars(task: dict) -> list[str]:
     return refs
 
 
-def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
+def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     """Execute the mock playbook and return a RunResult.
 
     Two-phase execution (mirrors real ansible-playbook):
@@ -166,14 +162,14 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
         as succeeded.
     """
     run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
-    log_path = RUNS_DIR / f"run-{run_id}.log"
+    log_path = runs_dir() / f"run-{run_id}.log"
     failures: list[dict] = []
     succeeded: list[str] = []
 
-    # Resolve playbook_path to absolute so relative_to(REPO_ROOT) works from any cwd.
+    # Resolve playbook_path to absolute so relative_to(repo_root()) works from any cwd.
     playbook_path = playbook_path.resolve()
-    inv = _load_yaml(REPO_ROOT / "ansible" / "inventory.yml")
-    group_vars = _load_yaml(REPO_ROOT / "ansible" / "group_vars" / "all.yml") or {}
+    inv = _load_yaml(repo_root() / "ansible" / "inventory.yml")
+    group_vars = _load_yaml(repo_root() / "ansible" / "group_vars" / "all.yml") or {}
     playbook = _expand_playbook(playbook_path)
 
     log_lines: list[str] = []
@@ -185,12 +181,12 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
 
     rc = 0
 
-    # ── Phase A: parse-time validation ──────────────────────────────────────
+    # ── Phase A: parse-time validation ─────────────────────────────────────
     parse_failures_by_task: dict[tuple[str, str], list[dict]] = {}
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
-        play_source = play.get("_source_playbook", str(playbook_path.relative_to(REPO_ROOT)))
+        play_source = play.get("_source_playbook", str(playbook_path.relative_to(repo_root())))
         tasks = play.get("tasks", [])
 
         for task in tasks:
@@ -249,11 +245,11 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
     log_lines.append("PHASE B: Runtime execution")
     log_lines.append("")
 
-    # ── Phase B: runtime execution ──────────────────────────────────────────
+    # ── Phase B: runtime execution ───────────────────────────────────────
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
-        play_source = play.get("_source_playbook", str(playbook_path.relative_to(REPO_ROOT)))
+        play_source = play.get("_source_playbook", str(playbook_path.relative_to(repo_root())))
         tasks = play.get("tasks", [])
 
         hosts = _hosts_in_inventory(inv, target)
@@ -299,7 +295,7 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
             log_lines.append("")
 
         log_lines.append(
-            f"PLAY RECAP: " + "  ".join(
+            "PLAY RECAP: " + "  ".join(
                 f"{h} : ok=1  changed=0  unreachable=0  failed=0" for h in hosts
             )
         )
@@ -310,41 +306,43 @@ def run(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
 
     return RunResult(
         exit_code=rc,
-        log_path=str(log_path.relative_to(REPO_ROOT)),
+        log_path=str(log_path.relative_to(repo_root())),
         failures=failures,
         succeeded_hosts=succeeded,
     )
 
 
-def run_real(playbook_path: Path, run_id: Optional[str] = None) -> RunResult:
+def run_real(playbook_path: Path, run_id: str | None = None) -> RunResult:
     """Run real ansible-playbook if available. Used when PIPELINE_RUNNER=real."""
     run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
-    log_path = RUNS_DIR / f"run-{run_id}.log"
+    log_path = runs_dir() / f"run-{run_id}.log"
     cmd = [
         "ansible-playbook",
-        "-i", str(REPO_ROOT / "ansible" / "inventory.yml"),
+        "-i", str(repo_root() / "ansible" / "inventory.yml"),
         str(playbook_path),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     log_path.write_text(proc.stdout + proc.stderr)
     return RunResult(
         exit_code=proc.returncode,
-        log_path=str(log_path.relative_to(REPO_ROOT)),
+        log_path=str(log_path.relative_to(repo_root())),
         failures=[],
         succeeded_hosts=[],
     )
 
 
-def run_pipeline(playbook_path: Optional[Path] = None, run_id: Optional[str] = None) -> RunResult:
+def run_pipeline(playbook_path: Path | None = None, run_id: str | None = None) -> RunResult:
     """Public entrypoint — picks mock or real runner based on env var."""
+    default_pb = repo_root() / "ansible" / "playbooks" / "site.yml"
     use_real = os.environ.get("PIPELINE_RUNNER", "mock") == "real"
     if use_real and shutil.which("ansible-playbook"):
-        return run_real(playbook_path or (REPO_ROOT / "ansible" / "playbooks" / "site.yml"), run_id)
-    return run(playbook_path or (REPO_ROOT / "ansible" / "playbooks" / "site.yml"), run_id)
+        return run_real(playbook_path or default_pb, run_id)
+    return run(playbook_path or default_pb, run_id)
 
 
 if __name__ == "__main__":
-    pb = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO_ROOT / "ansible" / "playbooks" / "site.yml"
+    _default = repo_root() / "ansible" / "playbooks" / "site.yml"
+    pb = Path(sys.argv[1]) if len(sys.argv) > 1 else _default
     result = run_pipeline(pb)
     print(f"\nexit_code={result.exit_code}")
     print(f"log_path={result.log_path}")
