@@ -355,8 +355,10 @@ class Transcript:
         self._lines.append(f"- Started: `{time.strftime('%Y-%m-%d %H:%M:%S %Z')}`")
         self._lines.append(f"- LLM bridge enabled: `{self._use_llm}`")
         if self._use_llm:
-            self._lines.append(f"- LLM model: `{llm_bridge.DEFAULT_MODEL}` "
-                               f"(available: `{llm_bridge.is_available()}`)")
+            self._lines.append(
+                f"- LLM provider: `{llm_bridge.active_provider() or 'none'}` "
+                f"(model: `{llm_bridge.active_model()}`, "
+                f"available: `{llm_bridge.is_available()}`)")
         self._lines.append("")
         self._lines.append("---")
         self._lines.append("")
