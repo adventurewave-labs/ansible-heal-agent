@@ -1,16 +1,31 @@
 """The agent's heal loop.
 
-Loop contract:
-  iter 0: run pipeline → if green, exit. else collect failures.
-  iter 1..max_retries:
-    for each failure: diagnose → patch → commit.
-    re-run pipeline. if green, exit.
-  else: declare defeat and write a final transcript.
+Three modes, selected by the ``mode`` argument:
+
+``apply`` (default)
+    iter 0: run pipeline → if green, exit. else collect failures.
+    iter 1..max_retries: diagnose → patch → commit each failure, re-run.
+    Exit early on green; give up after max_retries.
+
+``dry-run``
+    Run once, diagnose every failure and compute the patch it *would* apply,
+    write nothing, commit nothing. This is the mode to point at a repository
+    you do not yet trust the agent with.
+
+``pr``
+    PRD NFR-3. Patch and commit onto a fresh ``heal/<run-id>`` branch, push it,
+    open a pull request, and **stop** — the pipeline is not re-run and the base
+    branch is never touched. A human merges, or does not.
+
+Only ``apply`` writes to the checked-out branch, and only ``apply`` re-runs the
+pipeline after patching.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +33,12 @@ from pathlib import Path
 from agent import committer, diagnoser, patcher, pipeline_restarter
 from agent import llm as llm_bridge
 from pipeline import git_helper
+
+#: Modes the heal loop understands.
+MODE_APPLY = "apply"
+MODE_DRY_RUN = "dry-run"
+MODE_PR = "pr"
+MODES = (MODE_APPLY, MODE_DRY_RUN, MODE_PR)
 
 
 @dataclass
@@ -32,36 +53,125 @@ class IterationRecord:
 
 
 @dataclass
+class Proposal:
+    """A fix the agent would apply, in dry-run mode."""
+    failure: dict
+    diagnosis: dict
+    target_file: str | None
+    diff: str
+    blocked_reason: str | None = None
+
+
+@dataclass
 class HealResult:
     success: bool
     iterations: int
     final_exit_code: int
     history: list[IterationRecord] = field(default_factory=list)
     transcript_path: str | None = None
+    mode: str = MODE_APPLY
+    proposals: list[Proposal] = field(default_factory=list)
+    branch: str | None = None
+    pushed: bool = False
+    push_error: str | None = None
+    pr_url: str | None = None
+    blocked: list[str] = field(default_factory=list)
 
 
 def heal(playbook: str = "ansible/playbooks/site.yml",
          max_retries: int = 3,
          use_llm: bool = True,
-         transcript: Transcript | None = None) -> HealResult:
-    """Run the heal loop. Returns a HealResult summarising the run."""
+         transcript: Transcript | None = None,
+         mode: str = MODE_APPLY,
+         remote: str = "origin") -> HealResult:
+    """Run the heal loop in ``mode``. Returns a HealResult summarising the run."""
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r}; expected one of {MODES}")
+
     git_helper.init_if_needed()
     history: list[IterationRecord] = []
-    result = HealResult(success=False, iterations=0, final_exit_code=-1, history=history)
+    result = HealResult(success=False, iterations=0, final_exit_code=-1,
+                        history=history, mode=mode)
 
-    for i in range(max_retries + 1):
-        run_id = time.strftime(f"%Y%m%d-%H%M%S-iter{i}")
-        run = pipeline_restarter.restart(playbook=playbook, run_id=run_id)
+    if mode == MODE_DRY_RUN:
+        return _heal_dry_run(playbook, use_llm, transcript, result)
+    if mode == MODE_PR:
+        return _heal_pr(playbook, use_llm, transcript, result, remote)
+    return _heal_apply(playbook, max_retries, use_llm, transcript, result)
 
+
+def _diagnose_and_patch(failure: dict, use_llm: bool, transcript: Transcript | None,
+                        rec: IterationRecord, dry_run: bool = False):
+    """Diagnose one failure and apply (or simulate) its patch.
+
+    Returns ``(fix, diagnosis, patch)`` on success, or ``(None, diagnosis, None)``
+    if no patch could be applied. Falls back from an LLM diagnosis to the
+    deterministic one exactly once.
+    """
+    if transcript:
+        transcript.failure_found(failure)
+
+    diag = diagnoser.diagnose(failure, use_llm=use_llm)
+    rec.diagnoses.append(diag)
+    if transcript:
+        transcript.diagnosis(failure, diag)
+
+    fix = diag.get("fix", {})
+    try:
+        patch = patcher.apply_fix(fix, dry_run=dry_run)
+        rec.patches.append(patch)
         if transcript:
-            transcript.iteration_header(i, run)
+            transcript.patch_applied(fix, patch)
+        return fix, diag, patch
+    except patcher.PathNotAllowed as e:
+        # Never retried: a denied path is a policy decision, not a bad guess.
+        if transcript:
+            transcript.patch_blocked(fix, str(e))
+        return None, diag, {"blocked_reason": str(e)}
+    except patcher.PatchError as e:
+        if transcript:
+            transcript.patch_failed(fix, str(e))
+        if not (use_llm and "_fallback_reason" not in diag):
+            return None, diag, None
 
-        rec = IterationRecord(
-            iteration=i,
-            run_log_path=run.log_path,
-            exit_code=run.exit_code,
-            failures=run.failures,
-        )
+        # The LLM produced a patch that did not apply. Try the deterministic
+        # diagnoser once, then give up on this failure.
+        fb_diag = diagnoser.fallback_diagnose(failure)
+        fb_diag["_fallback_reason"] = f"LLM patch failed validation: {e}"
+        rec.diagnoses.append(fb_diag)
+        if transcript:
+            transcript.diagnosis(failure, fb_diag)
+        fb_fix = fb_diag.get("fix", {})
+        try:
+            patch = patcher.apply_fix(fb_fix, dry_run=dry_run)
+            rec.patches.append(patch)
+            if transcript:
+                transcript.patch_applied(fb_fix, patch)
+            return fb_fix, fb_diag, patch
+        except patcher.PatchError as e2:
+            if transcript:
+                transcript.patch_failed(fb_fix, str(e2))
+            return None, fb_diag, None
+
+
+def _run_once(playbook: str, i: int, transcript: Transcript | None) -> tuple:
+    run_id = time.strftime(f"%Y%m%d-%H%M%S-iter{i}")
+    run = pipeline_restarter.restart(playbook=playbook, run_id=run_id)
+    if transcript:
+        transcript.iteration_header(i, run)
+    rec = IterationRecord(
+        iteration=i,
+        run_log_path=run.log_path,
+        exit_code=run.exit_code,
+        failures=run.failures,
+    )
+    return run, rec
+
+
+def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResult:
+    history = result.history
+    for i in range(max_retries + 1):
+        run, rec = _run_once(playbook, i, transcript)
 
         if run.exit_code == 0:
             result.success = True
@@ -73,7 +183,6 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
             break
 
         if i == max_retries:
-            # Last iteration and still failing — give up.
             result.success = False
             result.iterations = i
             result.final_exit_code = run.exit_code
@@ -82,62 +191,153 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
                 transcript.give_up(i, run)
             break
 
-        # Diagnose + patch + commit each failure.
+        progressed = False
         for failure in run.failures:
-            if transcript:
-                transcript.failure_found(failure)
-
-            diag = diagnoser.diagnose(failure, use_llm=use_llm)
-            rec.diagnoses.append(diag)
-            if transcript:
-                transcript.diagnosis(failure, diag)
-
-            fix = diag.get("fix", {})
-            try:
-                patch = patcher.apply_fix(fix)
-                rec.patches.append(patch)
-                if transcript:
-                    transcript.patch_applied(fix, patch)
-            except patcher.PatchError as e:
-                if transcript:
-                    transcript.patch_failed(fix, str(e))
-                # If the LLM produced a malformed patch, retry once with the
-                # deterministic fallback — it produces patches that are
-                # guaranteed to match the baseline.
-                if use_llm and "_fallback_reason" not in diag:
-                    fb_diag = diagnoser.fallback_diagnose(failure)
-                    fb_diag["_fallback_reason"] = (
-                        f"LLM patch failed validation: {e}"
-                    )
-                    rec.diagnoses.append(fb_diag)
-                    if transcript:
-                        transcript.diagnosis(failure, fb_diag)
-                    fb_fix = fb_diag.get("fix", {})
-                    try:
-                        patch = patcher.apply_fix(fb_fix)
-                        rec.patches.append(patch)
-                        if transcript:
-                            transcript.patch_applied(fb_fix, patch)
-                        fix = fb_fix
-                        diag = fb_diag
-                    except patcher.PatchError as e2:
-                        if transcript:
-                            transcript.patch_failed(fb_fix, str(e2))
-                        continue
-                else:
-                    continue
-
+            fix, diag, patch = _diagnose_and_patch(failure, use_llm, transcript, rec)
+            if patch and patch.get("blocked_reason"):
+                result.blocked.append(patch["blocked_reason"])
+            if fix is None:
+                continue
             sha = committer.commit_fix(fix, diag)
             rec.commits.append(sha)
+            progressed = True
             if transcript:
                 transcript.committed(sha, fix)
 
         history.append(rec)
 
+        if not progressed:
+            # Nothing was patched this round, so re-running would produce the
+            # identical failure set. Stop instead of burning the retry budget
+            # on a loop that cannot converge.
+            result.success = False
+            result.iterations = i
+            result.final_exit_code = run.exit_code
+            if transcript:
+                transcript.stalled(i, run)
+            break
+
     return result
 
 
-# ── Transcript writer ──────────────────────────────────────────────────
+def _heal_dry_run(playbook, use_llm, transcript, result) -> HealResult:
+    """Diagnose everything, write nothing, commit nothing."""
+    run, rec = _run_once(playbook, 0, transcript)
+    result.history.append(rec)
+    result.final_exit_code = run.exit_code
+    result.iterations = 0
+
+    if run.exit_code == 0:
+        result.success = True
+        if transcript:
+            transcript.green(0, run)
+        return result
+
+    for failure in run.failures:
+        fix, diag, patch = _diagnose_and_patch(
+            failure, use_llm, transcript, rec, dry_run=True)
+        blocked = patch.get("blocked_reason") if patch else None
+        if blocked:
+            result.blocked.append(blocked)
+        result.proposals.append(Proposal(
+            failure=failure,
+            diagnosis=diag,
+            target_file=(fix or {}).get("target_file"),
+            diff=(patch or {}).get("diff", ""),
+            blocked_reason=blocked,
+        ))
+
+    # A dry run reports; it does not claim to have healed anything.
+    result.success = False
+    if transcript:
+        transcript.dry_run_summary(result)
+    return result
+
+
+def _heal_pr(playbook, use_llm, transcript, result, remote) -> HealResult:
+    """Patch onto a fresh branch, push it, open a PR, and stop (PRD NFR-3)."""
+    run, rec = _run_once(playbook, 0, transcript)
+    result.history.append(rec)
+    result.final_exit_code = run.exit_code
+    result.iterations = 0
+
+    if run.exit_code == 0:
+        result.success = True
+        if transcript:
+            transcript.green(0, run)
+        return result
+
+    base = git_helper.current_branch()
+    branch = f"heal/{time.strftime('%Y%m%d-%H%M%S')}"
+    if not git_helper.create_branch(branch):
+        result.push_error = f"could not create branch {branch}"
+        return result
+    result.branch = branch
+    if transcript:
+        transcript.branch_created(branch, base)
+
+    for failure in run.failures:
+        fix, diag, patch = _diagnose_and_patch(failure, use_llm, transcript, rec)
+        if patch and patch.get("blocked_reason"):
+            result.blocked.append(patch["blocked_reason"])
+        if fix is None:
+            continue
+        sha = committer.commit_fix(fix, diag)
+        rec.commits.append(sha)
+        if transcript:
+            transcript.committed(sha, fix)
+
+    if not rec.commits:
+        git_helper.checkout(base)
+        result.push_error = "no patches applied; nothing to open a PR for"
+        return result
+
+    if git_helper.has_remote(remote):
+        proc = git_helper.push(remote, branch)
+        result.pushed = proc.returncode == 0
+        if not result.pushed:
+            result.push_error = proc.stderr.strip()[:500]
+        else:
+            result.pr_url = _open_pull_request(branch, base, rec)
+    else:
+        result.push_error = f"no remote named {remote!r}; branch left local"
+
+    # The pipeline is deliberately NOT re-run and the base branch is not
+    # touched. Success here means "a reviewable change was produced".
+    result.success = bool(rec.commits)
+    git_helper.checkout(base)
+    if transcript:
+        transcript.pr_summary(result)
+    return result
+
+
+def _open_pull_request(branch: str, base: str, rec: IterationRecord) -> str | None:
+    """Open a PR with the gh CLI if it is available. Returns the URL or None."""
+    if not shutil.which("gh"):
+        return None
+    body_lines = [
+        "Opened automatically by ansible-heal-agent in `--require-human-approval` "
+        "mode. The pipeline has **not** been re-run and `" + base + "` was not "
+        "modified.",
+        "",
+        f"Failures diagnosed: {len(rec.failures)}",
+        "",
+    ]
+    for d in rec.diagnoses:
+        body_lines.append(f"- **{d.get('failure_type', 'unknown')}** — "
+                          f"{d.get('diagnosis', '').strip()}")
+    proc = subprocess.run(
+        ["gh", "pr", "create", "--base", base, "--head", branch,
+         "--title", f"fix: automated Ansible remediation ({len(rec.commits)} commits)",
+         "--body", "\n".join(body_lines)],
+        cwd=git_helper.repo_root(), capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
+
+
+# ── Transcript writer ──────────────────────────────────────────────
 
 class Transcript:
     """Append-only Markdown transcript writer used by the heal loop."""
@@ -198,6 +398,56 @@ class Transcript:
         self._lines.append("**Patch FAILED**")
         self._lines.append(f"- file: `{fix.get('target_file')}`")
         self._lines.append(f"- error: `{err}`")
+        self._lines.append("")
+
+    def patch_blocked(self, fix: dict, err: str) -> None:
+        self._lines.append("**Patch BLOCKED by the write allowlist**")
+        self._lines.append(f"- file: `{fix.get('target_file')}`")
+        self._lines.append(f"- policy: `{err}`")
+        self._lines.append("")
+
+    def branch_created(self, branch: str, base: str) -> None:
+        self._lines.append(f"### Branch `{branch}` created from `{base}`")
+        self._lines.append("")
+        self._lines.append("PR mode: the base branch will not be modified and the "
+                           "pipeline will not be re-run.")
+        self._lines.append("")
+
+    def stalled(self, i: int, run) -> None:
+        self._lines.append(f"### ⚠ Iteration {i} — no patch could be applied")
+        self._lines.append("")
+        self._lines.append("Re-running would produce an identical failure set, so "
+                           "the loop stopped rather than exhausting its retries.")
+        self._lines.append("")
+
+    def dry_run_summary(self, result) -> None:
+        self._lines.append("---")
+        self._lines.append("")
+        self._lines.append("## Dry run — nothing was written or committed")
+        self._lines.append("")
+        self._lines.append(f"- Proposals: `{len(result.proposals)}`")
+        self._lines.append(f"- Blocked by allowlist: `{len(result.blocked)}`")
+        self._lines.append("")
+        for prop in result.proposals:
+            self._lines.append(f"### Would edit `{prop.target_file}`")
+            if prop.blocked_reason:
+                self._lines.append(f"_BLOCKED: {prop.blocked_reason}_")
+            self._lines.append("```diff")
+            self._lines.append(prop.diff)
+            self._lines.append("```")
+            self._lines.append("")
+
+    def pr_summary(self, result) -> None:
+        self._lines.append("---")
+        self._lines.append("")
+        self._lines.append("## PR mode")
+        self._lines.append("")
+        self._lines.append(f"- Branch: `{result.branch}`")
+        self._lines.append(f"- Pushed: `{result.pushed}`")
+        if result.pr_url:
+            self._lines.append(f"- Pull request: {result.pr_url}")
+        if result.push_error:
+            self._lines.append(f"- Push error: `{result.push_error}`")
         self._lines.append("")
 
     def committed(self, sha: str, fix: dict) -> None:
