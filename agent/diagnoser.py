@@ -86,11 +86,14 @@ def fallback_diagnose(failure: dict) -> dict[str, Any]:
     """Deterministic rule-based diagnoser for the three shipped failure classes."""
     ftype = failure.get("type")
 
-    if ftype == "unreachable_host":
+    if ftype in ("unreachable_host", "no_hosts_matched"):
         # We expect the playbook to target 'web-server-01' but inventory has 'web-01'.
         # Heuristic: rename inventory entry to match the playbook's host pattern.
         # The 'host' field in the failure is the pattern that failed (e.g. web-server-01).
-        target = failure.get("host") or "web-server-01"
+        # no_hosts_matched carries the unmatched pattern; unreachable_host
+        # carries the host that could not be reached. Either way it is the name
+        # the playbook expects the inventory to contain.
+        target = failure.get("pattern") or failure.get("host") or "web-server-01"
         return {
             "diagnosis": f"Inventory references stale hostname; playbook expects '{target}'.",
             "failure_type": "unreachable_host",
