@@ -11,6 +11,8 @@ dist/
 htmlcov/
 transcripts/*.md
 transcripts/*.json
+# docs/example-transcript.md is committed on purpose: it is the audit
+# artifact the README points at.
 pipeline/runs/*.log
 pipeline/runs/*.json
 .ansible-heal/
