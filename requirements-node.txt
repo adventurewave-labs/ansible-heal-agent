@@ -1,4 +1,0 @@
-# z-ai-web-dev-sdk (provides the `z-ai` CLI used by the agent's LLM bridge)
-# The host environment already ships `z-ai` on PATH; no Python install required.
-# For local installs outside the host image, run:
-#   npm install z-ai-web-dev-sdk
