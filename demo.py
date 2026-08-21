@@ -65,10 +65,13 @@ def main(argv: list[str] | None = None) -> int:
 
     use_llm = llm_bridge.is_available()
     if use_llm:
-        print("[2/4] LLM bridge: ENABLED")
+        print(f"[2/4] LLM bridge: ENABLED via {llm_bridge.active_provider()} "
+              f"({llm_bridge.active_model()})")
     else:
-        print("[2/4] LLM bridge: DISABLED (no provider available) — using the "
+        print("[2/4] LLM bridge: DISABLED (no provider configured) — using the "
               "deterministic fallback diagnoser.")
+        print("      Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY to exercise "
+              "the LLM path.")
     print()
 
     ts = time.strftime("%Y%m%d-%H%M%S")
