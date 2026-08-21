@@ -2,6 +2,9 @@
 PyYAML>=6.0
 click>=8.1
 rich>=13.7
+# Round-trip YAML so the agent's structural edits preserve comments,
+# key order and indentation instead of rewriting whole files.
+ruamel.yaml>=0.18
 
 # Dev (optional)
 pytest>=8.0
