@@ -6,6 +6,10 @@ rich>=13.7
 # key order and indentation instead of rewriting whole files.
 ruamel.yaml>=0.18
 
+# The LLM bridge speaks HTTP with urllib from the standard library, so no
+# provider SDK is required. Configure a backend with ANTHROPIC_API_KEY,
+# OPENROUTER_API_KEY, or a z-ai CLI on PATH.
+
 # Dev (optional)
 pytest>=8.0
 pytest-cov>=5.0
