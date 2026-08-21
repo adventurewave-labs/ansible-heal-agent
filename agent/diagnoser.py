@@ -136,7 +136,7 @@ def fallback_diagnose(failure: dict) -> dict[str, Any]:
             "fix": {
                 "action": "edit_file",
                 "target_file": "ansible/group_vars/all.yml",
-                "search": "# (nginx_port is intentionally omitted — see scenarios/missing_var.py)",
+                "search": "# (nginx_port is intentionally omitted — see scenarios/seed.py)",
                 "replace": "# Added by ansible-heal-agent\nnginx_port: 8080",
                 "rationale": (f"Add a sensible default for '{var}' to group_vars "
                               "so the template can render."),
