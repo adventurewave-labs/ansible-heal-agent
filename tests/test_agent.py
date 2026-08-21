@@ -55,27 +55,37 @@ def test_runner_goes_green_once_baseline_is_fixed(scratch_repo):
     assert result.failures == []
 
 
-# ── diagnoser (pure functions — no filesystem writes) ────────────────────────
+# ── diagnoser ───────────────────────────────────────────────────────
 
 def test_fallback_diagnoser_hostname_change(scratch_repo):
     diag = diagnoser.fallback_diagnose(
         {"type": "unreachable_host", "host": "web-server-01", "message": "x"})
     assert diag["failure_type"] == "unreachable_host"
+    assert diag["fix"]["action"] == "rename_host"
     assert diag["fix"]["target_file"] == "ansible/inventory.yml"
+    # The stale host is found by comparing against the real inventory.
+    assert diag["fix"]["old"] == "web-01"
+    assert diag["fix"]["new"] == "web-server-01"
 
 
 def test_fallback_diagnoser_removed_module(scratch_repo):
     diag = diagnoser.fallback_diagnose(
         {"type": "removed_module", "module": "apt_key", "message": "x"})
     assert diag["failure_type"] == "removed_module"
-    assert "apt_key" in diag["fix"]["search"]
+    assert diag["fix"]["action"] == "replace_module"
+    assert diag["fix"]["old_module"] == "apt_key"
+    assert diag["fix"]["new_module"] == "ansible.builtin.get_url"
+    # The playbook it targets is discovered, not hardcoded.
+    assert diag["fix"]["target_file"] == "ansible/playbooks/webservers.yml"
 
 
 def test_fallback_diagnoser_undefined_var(scratch_repo):
     diag = diagnoser.fallback_diagnose(
         {"type": "undefined_variable", "variable": "nginx_port", "message": "x"})
+    assert diag["fix"]["action"] == "set_yaml_key"
     assert diag["fix"]["target_file"] == "ansible/group_vars/all.yml"
-    assert "nginx_port" in diag["fix"]["replace"]
+    assert diag["fix"]["key"] == "nginx_port"
+    assert diag["fix"]["value"] == 8080
 
 
 def test_unknown_failure_type_yields_no_op_fix(scratch_repo):
@@ -90,7 +100,12 @@ def test_patcher_applies_hostname_rename(scratch_repo):
         {"type": "unreachable_host", "host": "web-server-01", "message": "x"})
     patch = patcher.apply_fix(diag["fix"])
     assert patch["ok"]
-    assert "web-server-01" in (scratch_repo / "ansible" / "inventory.yml").read_text()
+    inventory = (scratch_repo / "ansible" / "inventory.yml").read_text()
+    assert "web-server-01:" in inventory
+    assert "web-01:" not in inventory
+    # The other host and its vars survive the structural edit.
+    assert "web-02:" in inventory
+    assert "10.0.1.22" in inventory
 
 
 def test_patcher_rejects_second_apply(scratch_repo):
