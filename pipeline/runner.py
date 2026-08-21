@@ -19,6 +19,7 @@ also returns the log path so the agent can pick it up immediately.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -304,6 +305,10 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     log_lines.append(f"EXIT CODE: {rc}")
     log_path.write_text("\n".join(log_lines) + "\n")
 
+    # Structured sidecar, so consumers never have to parse the mock's prose.
+    # The real runner's callback plugin writes the same shape.
+    log_path.with_suffix(".json").write_text(json.dumps(failures, indent=2))
+
     return RunResult(
         exit_code=rc,
         log_path=str(log_path.relative_to(repo_root())),
@@ -312,30 +317,128 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     )
 
 
+#: Directory holding the Ansible callback plugin that emits structured failures.
+CALLBACK_DIR = Path(__file__).resolve().parent / "callback_plugins"
+
+
+class RunnerUnavailable(RuntimeError):
+    """Raised when the requested runner cannot be used."""
+
+
+def _merge_failures(primary: list[dict], extra: list[dict]) -> list[dict]:
+    """Merge two failure lists, dropping duplicates.
+
+    The callback sidecar and the text scan overlap for runtime failures; they
+    must not both be reported. Identity is (type, host, variable-or-module).
+    """
+    def key(f: dict) -> tuple:
+        return (
+            f.get("type"),
+            f.get("host"),
+            f.get("variable") or f.get("module_short") or f.get("module"),
+        )
+
+    seen = {key(f) for f in primary}
+    merged = list(primary)
+    for f in extra:
+        if key(f) not in seen:
+            seen.add(key(f))
+            merged.append(f)
+    return merged
+
+
 def run_real(playbook_path: Path, run_id: str | None = None) -> RunResult:
-    """Run real ansible-playbook if available. Used when PIPELINE_RUNNER=real."""
+    """Run the real ``ansible-playbook`` and return structured failures.
+
+    Failures come from two places, because no single source sees everything:
+
+    * The ``heal_json`` callback plugin, for runtime events (task failures,
+      unreachable hosts, and a host pattern matching nothing — which real
+      Ansible reports as a *warning* while exiting 0).
+    * A text scan of stdout/stderr, for parse-time errors. An unresolvable
+      module aborts before any callback fires and exits 4, so the callback
+      never sees it.
+
+    Exit-code handling matches what the pipeline actually means rather than
+    what Ansible returns: a run that skipped a whole play because its host
+    pattern matched nothing exits 0, and is reported here as a failure.
+    """
+    if not shutil.which("ansible-playbook"):
+        raise RunnerUnavailable(
+            "PIPELINE_RUNNER=real but ansible-playbook is not on PATH. "
+            "Install ansible-core, or unset PIPELINE_RUNNER to use the mock."
+        )
+
     run_id = run_id or time.strftime("%Y%m%d-%H%M%S")
     log_path = runs_dir() / f"run-{run_id}.log"
-    cmd = [
-        "ansible-playbook",
-        "-i", str(repo_root() / "ansible" / "inventory.yml"),
-        str(playbook_path),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    sidecar = log_path.with_suffix(".json")
+    if sidecar.exists():
+        sidecar.unlink()
+
+    inventory = repo_root() / "ansible" / "inventory.yml"
+    env = dict(os.environ)
+    env.update({
+        "ANSIBLE_CALLBACK_PLUGINS": str(CALLBACK_DIR),
+        "ANSIBLE_CALLBACKS_ENABLED": "heal_json",
+        "ANSIBLE_HEAL_SIDECAR": str(sidecar),
+        "ANSIBLE_FORCE_COLOR": "0",
+        "ANSIBLE_NOCOLOR": "1",
+        "ANSIBLE_RETRY_FILES_ENABLED": "0",
+    })
+
+    proc = subprocess.run(
+        ["ansible-playbook", "-i", str(inventory), str(playbook_path)],
+        capture_output=True, text=True, check=False,
+        cwd=str(repo_root()), env=env,
+    )
     log_path.write_text(proc.stdout + proc.stderr)
+
+    from agent import log_scanner
+
+    payload = log_scanner.read_sidecar(log_path)
+    failures = list(payload) if payload else []
+    failures = _merge_failures(
+        failures, log_scanner.extract_failures(log_path, text_only=True))
+
+    ok_hosts: list[str] = []
+    if sidecar.exists():
+        try:
+            ok_hosts = json.loads(sidecar.read_text()).get("ok_hosts", [])
+        except (json.JSONDecodeError, AttributeError):
+            ok_hosts = []
+
+    rc = proc.returncode
+    if rc == 0 and failures:
+        # A play skipped because its host pattern matched nothing is not a
+        # healthy pipeline, whatever Ansible's exit code says.
+        rc = 2
+    if rc != 0 and not failures:
+        # Never report "it failed but there is nothing to fix" — that is how
+        # the previous implementation silently did nothing for three rounds.
+        tail = (proc.stderr or proc.stdout).strip().splitlines()[-5:]
+        failures = [{
+            "type": "unclassified",
+            "host": None,
+            "message": " ".join(tail)[:500] or f"ansible-playbook exited {rc}",
+        }]
+
     return RunResult(
-        exit_code=proc.returncode,
+        exit_code=rc,
         log_path=str(log_path.relative_to(repo_root())),
-        failures=[],
-        succeeded_hosts=[],
+        failures=failures,
+        succeeded_hosts=ok_hosts,
     )
 
 
 def run_pipeline(playbook_path: Path | None = None, run_id: str | None = None) -> RunResult:
-    """Public entrypoint — picks mock or real runner based on env var."""
+    """Public entrypoint — picks the mock or real runner from PIPELINE_RUNNER.
+
+    ``PIPELINE_RUNNER=real`` with no ansible-playbook installed raises rather
+    than silently running the mock: an operator who asked for the real thing
+    and got a simulation would have no way to tell.
+    """
     default_pb = repo_root() / "ansible" / "playbooks" / "site.yml"
-    use_real = os.environ.get("PIPELINE_RUNNER", "mock") == "real"
-    if use_real and shutil.which("ansible-playbook"):
+    if os.environ.get("PIPELINE_RUNNER", "mock") == "real":
         return run_real(playbook_path or default_pb, run_id)
     return run(playbook_path or default_pb, run_id)
 
