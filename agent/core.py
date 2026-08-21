@@ -32,6 +32,7 @@ from pathlib import Path
 
 from agent import committer, diagnoser, patcher, pipeline_restarter
 from agent import llm as llm_bridge
+from agent.config import repo_root
 from pipeline import git_helper
 
 #: Modes the heal loop understands.
@@ -456,11 +457,24 @@ class Transcript:
         self._lines.append(f"- committed: `{sha[:12]}` → `{fix.get('target_file')}`")
         self._lines.append("")
 
+    @staticmethod
+    def _read_log(run) -> str:
+        """Return the run's log text.
+
+        ``run.log_path`` is repo-relative; resolving it against the repo root
+        is what makes this work. Without that these blocks rendered empty in
+        every transcript the agent has ever written.
+        """
+        path = Path(run.log_path)
+        if not path.is_absolute():
+            path = repo_root() / path
+        return path.read_text() if path.is_file() else "(run log not found)"
+
     def green(self, i: int, run) -> None:
         self._lines.append(f"### ✅ Iteration {i} → pipeline green")
         self._lines.append("")
         self._lines.append("```")
-        self._lines.append(Path(run.log_path).read_text() if Path(run.log_path).exists() else "")
+        self._lines.append(self._read_log(run))
         self._lines.append("```")
         self._lines.append("")
 
@@ -468,7 +482,7 @@ class Transcript:
         self._lines.append(f"### ❌ Iteration {i} — max retries exhausted, giving up")
         self._lines.append("")
         self._lines.append("```")
-        self._lines.append(Path(run.log_path).read_text() if Path(run.log_path).exists() else "")
+        self._lines.append(self._read_log(run))
         self._lines.append("```")
         self._lines.append("")
 

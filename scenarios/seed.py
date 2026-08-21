@@ -22,8 +22,10 @@ INVENTORY_BROKEN = """\
 all:
   children:
     webservers:
+      # NOTE: the first host below is stale. webservers.yml targets
+      # 'web-server-01', which this inventory does not contain.
       hosts:
-        web-01:                     # <-- stale; playbook expects web-server-01
+        web-01:
           ansible_host: 10.0.1.21
           ansible_user: ubuntu
         web-02:
