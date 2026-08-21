@@ -6,3 +6,8 @@ rich>=13.7
 # Dev (optional)
 pytest>=8.0
 pytest-cov>=5.0
+
+# Integration tests drive a real ansible-playbook process. Without this the
+# tests in tests/test_real_ansible.py skip rather than fail, but then nothing
+# verifies that PIPELINE_RUNNER=real actually works.
+ansible-core>=2.16
