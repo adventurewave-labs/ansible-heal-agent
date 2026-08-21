@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 from agent import llm
-from pipeline.git_helper import REPO_ROOT
+from agent.config import repo_root
 
 SYSTEM_PROMPT = (
     "You are an SRE agent specialised in Ansible. Given a single pipeline failure "
@@ -77,7 +77,7 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
     """Call the LLM and return its structured diagnosis."""
     prompt = PROMPT_TEMPLATE.format(
         failure_json=json.dumps(failure, indent=2),
-        context=_load_context(failure, REPO_ROOT),
+        context=_load_context(failure, repo_root()),
     )
     return llm.chat_json(prompt, system=SYSTEM_PROMPT)
 
@@ -123,7 +123,8 @@ def fallback_diagnose(failure: dict) -> dict[str, Any]:
                     "        dest: /usr/share/keyrings/nginx-archive-keyring.gpg\n"
                     "        mode: '0644'\n"
                 ),
-                "rationale": "apt_key was removed in ansible-core 2.18; get_url to the keyring is the modern equivalent.",
+                "rationale": ("apt_key was removed in ansible-core 2.18; "
+                              "get_url to the keyring is the modern equivalent."),
             },
         }
 
@@ -136,8 +137,9 @@ def fallback_diagnose(failure: dict) -> dict[str, Any]:
                 "action": "edit_file",
                 "target_file": "ansible/group_vars/all.yml",
                 "search": "# (nginx_port is intentionally omitted — see scenarios/missing_var.py)",
-                "replace": f"# Added by ansible-heal-agent\nnginx_port: 8080",
-                "rationale": f"Add a sensible default for '{var}' to group_vars so the template can render.",
+                "replace": "# Added by ansible-heal-agent\nnginx_port: 8080",
+                "rationale": (f"Add a sensible default for '{var}' to group_vars "
+                              "so the template can render."),
             },
         }
 

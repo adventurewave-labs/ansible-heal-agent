@@ -1,14 +1,12 @@
 """CLI entrypoint — `python -m agent.cli` or `make demo` (which calls demo.py)."""
 from __future__ import annotations
 
-import json
 import time
-from pathlib import Path
 
 import click
 
-from agent.core import heal, Transcript
-from pipeline.git_helper import REPO_ROOT
+from agent.config import repo_root, transcripts_dir
+from agent.core import Transcript, heal
 
 
 @click.group()
@@ -29,7 +27,7 @@ def cli():
 def run(playbook: str, max_retries: int, no_llm: bool, transcript: bool):
     """Run the heal loop once and report the result."""
     ts = time.strftime("%Y%m%d-%H%M%S")
-    t_path = REPO_ROOT / "transcripts" / f"demo-{ts}.md" if transcript else None
+    t_path = transcripts_dir() / f"demo-{ts}.md" if transcript else None
     t = Transcript(t_path, use_llm=not no_llm) if t_path else None
 
     result = heal(playbook=playbook, max_retries=max_retries,
@@ -67,11 +65,11 @@ def status():
     click.echo("=== Recent commits ===")
     click.echo(git_helper.log(10))
     click.echo("\n=== Latest pipeline run (if any) ===")
-    runs_dir = REPO_ROOT / "pipeline" / "runs"
+    runs_dir = repo_root() / "pipeline" / "runs"
     if runs_dir.exists():
         logs = sorted(runs_dir.glob("run-*.log"))
         if logs:
-            click.echo(f"Latest log: {logs[-1].relative_to(REPO_ROOT)}")
+            click.echo(f"Latest log: {logs[-1].relative_to(repo_root())}")
             click.echo(logs[-1].read_text()[:2000])
         else:
             click.echo("no runs yet")

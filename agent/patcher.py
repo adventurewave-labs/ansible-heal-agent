@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from pipeline.git_helper import REPO_ROOT
+from agent.config import repo_root
 
 
 class PatchError(RuntimeError):
@@ -30,7 +30,7 @@ def _validate_yaml(path: Path, content: str) -> None:
         yaml.safe_load(content)
     except yaml.YAMLError as e:
         raise PatchError(
-            f"patched {path.relative_to(REPO_ROOT)} is invalid YAML: {e}"
+            f"patched {path.relative_to(repo_root())} is invalid YAML: {e}"
         ) from e
 
 
@@ -47,7 +47,7 @@ def apply_fix(fix: dict[str, Any]) -> dict[str, Any]:
         raise PatchError(f"Unknown action: {action}")
 
     target_rel = fix["target_file"]
-    target = REPO_ROOT / target_rel
+    target = repo_root() / target_rel
     if not target.exists():
         raise PatchError(f"target_file does not exist: {target_rel}")
 
