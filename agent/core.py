@@ -14,10 +14,9 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
+from agent import committer, diagnoser, patcher, pipeline_restarter
 from agent import llm as llm_bridge
-from agent import log_scanner, diagnoser, patcher, committer, pipeline_restarter
 from pipeline import git_helper
 
 
@@ -38,13 +37,13 @@ class HealResult:
     iterations: int
     final_exit_code: int
     history: list[IterationRecord] = field(default_factory=list)
-    transcript_path: Optional[str] = None
+    transcript_path: str | None = None
 
 
 def heal(playbook: str = "ansible/playbooks/site.yml",
          max_retries: int = 3,
          use_llm: bool = True,
-         transcript: Optional["Transcript"] = None) -> HealResult:
+         transcript: Transcript | None = None) -> HealResult:
     """Run the heal loop. Returns a HealResult summarising the run."""
     git_helper.init_if_needed()
     history: list[IterationRecord] = []
@@ -138,7 +137,7 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
     return result
 
 
-# ── Transcript writer ──────────────────────────────────────────────────────────
+# ── Transcript writer ──────────────────────────────────────────────────
 
 class Transcript:
     """Append-only Markdown transcript writer used by the heal loop."""

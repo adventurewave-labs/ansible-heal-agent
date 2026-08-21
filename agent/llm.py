@@ -9,13 +9,12 @@ in agent.diagnoser.fallback_diagnose.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Model identifier reported in transcripts. The z-ai CLI defaults to GLM-4-Plus.
 DEFAULT_MODEL = "glm-4-plus"
@@ -34,7 +33,7 @@ def is_available() -> bool:
     return shutil.which("z-ai") is not None
 
 
-def chat(prompt: str, system: Optional[str] = None, max_retries: int = 2) -> str:
+def chat(prompt: str, system: str | None = None, max_retries: int = 2) -> str:
     """Send a single chat completion request and return the assistant's text.
 
     Retries once on transient failure (network, malformed JSON). Raises LLMError
@@ -50,7 +49,7 @@ def chat(prompt: str, system: Optional[str] = None, max_retries: int = 2) -> str
     if system:
         cmd += ["--system", system]
 
-    last_err: Optional[str] = None
+    last_err: str | None = None
     for attempt in range(1, max_retries + 1):
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -73,7 +72,7 @@ def chat(prompt: str, system: Optional[str] = None, max_retries: int = 2) -> str
     raise LLMError(last_err or "z-ai CLI failed for unknown reasons")
 
 
-def chat_json(prompt: str, system: Optional[str] = None) -> dict[str, Any]:
+def chat_json(prompt: str, system: str | None = None) -> dict[str, Any]:
     """Like chat(), but parse the response as a JSON object.
 
     The LLM is prompted to return ONLY a JSON object. If the response contains
@@ -83,8 +82,13 @@ def chat_json(prompt: str, system: Optional[str] = None) -> dict[str, Any]:
     # Strip ```json fences if present
     if "```" in raw:
         lines = raw.splitlines()
-        start = next((i for i, l in enumerate(lines) if l.strip().startswith("```")), 0)
-        end = next((i for i, l in enumerate(lines) if i > start and l.strip().startswith("```")), len(lines))
+        start = next(
+            (i for i, line in enumerate(lines) if line.strip().startswith("```")), 0)
+        end = next(
+            (i for i, line in enumerate(lines)
+             if i > start and line.strip().startswith("```")),
+            len(lines),
+        )
         raw = "\n".join(lines[start + 1:end])
     # Find the first {...}...{...} block
     start = raw.find("{")
