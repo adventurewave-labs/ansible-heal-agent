@@ -120,9 +120,16 @@ Implement:
 - `agent/core.py` — the heal loop with `IterationRecord` + `HealResult` dataclasses
   + `Transcript` writer
 
-**Acceptance:** `python3 -c "from agent.core import heal; heal(use_llm=False)"`
-converges in ≤3 iterations against the broken baseline, leaving the repo in a
-green state.
+**Acceptance:** the heal loop converges in ≤3 iterations against the broken
+baseline, leaving the repo green.
+
+Run it against a scratch copy, not this checkout — `heal()` defaults to
+`repo_root()`, which is the package root, so calling it bare commits into
+whichever clone you are standing in:
+
+```bash
+$ ansible-heal run --repo /tmp/scratch-iac --no-llm      # or: make demo
+```
 
 ### 3.4 Phase 3 — LLM bridge (1 day)
 
@@ -136,9 +143,11 @@ Wire `diagnoser.diagnose()` to call `llm.chat_json()` with the structured prompt
 template, falling back to `fallback_diagnose()` on any error (LLM unavailable,
 malformed JSON, validation failure).
 
-**Acceptance:** `make demo` shows LLM-originated diagnoses for at least two of
-the three failures, with the YAML-validation layer catching and falling back on
-any malformed LLM patches.
+**Acceptance:** with a provider configured, `make demo` shows LLM-originated
+diagnoses, with the YAML-validation layer catching and falling back on any
+malformed LLM patches. With no provider — the default, and what CI runs — the
+demo reports `LLM bridge: DISABLED` and every diagnosis comes from the
+deterministic path.
 
 ### 3.5 Phase 4 — Demo + transcripts + tests (1 day)
 
@@ -379,7 +388,7 @@ To run the demo end-to-end, clone the repo and execute:
 
 ```bash
 $ cd ansible-heal-agent
-$ pip install -r requirements.txt   # PyYAML, click, rich, pytest
+$ make install   # deps (PyYAML, click, rich, ruamel.yaml, pytest, ruff) + the CLI
 $ make demo
 ```
 

@@ -177,8 +177,20 @@ def _run_once(playbook: str, i: int, transcript: Transcript | None) -> tuple:
     return run, rec
 
 
+def _fix_signature(fix: dict) -> tuple:
+    """Identity of a fix, for detecting one the agent has already applied."""
+    return (
+        fix.get("action"),
+        fix.get("target_file"),
+        fix.get("old") or fix.get("search") or fix.get("key"),
+        fix.get("new") or fix.get("replace") or fix.get("value"),
+    )
+
+
 def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResult:
     history = result.history
+    #: Signatures of fixes already applied, so a repeat is not counted as progress.
+    applied: set[tuple] = set()
     for i in range(max_retries + 1):
         run, rec = _run_once(playbook, i, transcript)
 
@@ -209,7 +221,18 @@ def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResul
                 continue
             sha = committer.commit_fix(fix, diag)
             rec.commits.append(sha)
-            progressed = True
+            # A fix the agent has already applied in an earlier iteration is not
+            # progress, even though it changed a file: it means two failures are
+            # fighting over the same edit and the loop cannot converge. Counting
+            # it as progress keeps the stall detector quiet while the agent burns
+            # the retry budget and lands a junk commit per round.
+            signature = _fix_signature(fix)
+            if signature in applied:
+                if transcript:
+                    transcript.repeated_fix(signature)
+            else:
+                applied.add(signature)
+                progressed = True
             if transcript:
                 transcript.committed(sha, fix)
 
@@ -363,12 +386,21 @@ class Transcript:
         self._lines.append("# Ansible-Heal-Agent — Demo Transcript")
         self._lines.append("")
         self._lines.append(f"- Started: `{time.strftime('%Y-%m-%d %H:%M:%S %Z')}`")
-        self._lines.append(f"- LLM bridge enabled: `{self._use_llm}`")
-        if self._use_llm:
+        # Report what the run can actually reach, not what was requested: with
+        # --llm and no provider configured, "enabled: True" read as though a
+        # model had been involved when every diagnosis came from the fallback.
+        if not self._use_llm:
             self._lines.append(
-                f"- LLM provider: `{llm_bridge.active_provider() or 'none'}` "
-                f"(model: `{llm_bridge.active_model()}`, "
-                f"available: `{llm_bridge.is_available()}`)")
+                "- LLM bridge: `disabled` — every diagnosis below is deterministic")
+        elif llm_bridge.is_available():
+            self._lines.append(
+                f"- LLM bridge: `enabled` — provider "
+                f"`{llm_bridge.active_provider()}`, model "
+                f"`{llm_bridge.active_model()}`")
+        else:
+            self._lines.append(
+                "- LLM bridge: `requested, but no provider is reachable` — "
+                "every diagnosis below came from the deterministic fallback")
         self._lines.append("")
         self._lines.append("---")
         self._lines.append("")
@@ -427,6 +459,14 @@ class Transcript:
         self._lines.append("")
         self._lines.append("PR mode: the base branch will not be modified and the "
                            "pipeline will not be re-run.")
+        self._lines.append("")
+
+    def repeated_fix(self, signature: tuple) -> None:
+        action, target, old, new = signature
+        self._lines.append(
+            f"_Already applied this iteration set: `{action}` on `{target}` "
+            f"({old!r} -> {new!r}). Two failures are asking for the same edit, "
+            f"so this does not count as progress._")
         self._lines.append("")
 
     def stalled(self, i: int, run) -> None:

@@ -1,13 +1,13 @@
 # Ansible-Heal-Agent — Demo Transcript
 
-- Started: `2026-08-21 22:18:42 UTC`
-- LLM bridge enabled: `False`
+- Started: `2026-08-22 20:35:31 UTC`
+- LLM bridge: `disabled` — every diagnosis below is deterministic
 
 ---
 
 ## Iteration 0
 
-- Pipeline run log: `pipeline/runs/run-20260821-221842-iter0.log`
+- Pipeline run log: `pipeline/runs/run-20260822-203531-iter0.log`
 - Exit code: `2`
 - 3 failure(s) detected.
 
@@ -17,7 +17,7 @@
   "type": "removed_module",
   "host": "web-server-01",
   "module": "ansible.builtin.apt_key",
-  "message": "The 'apt_key' module was removed in ansible-core 2.18. Use ansible.builtin.get_url + ansible.builtin.command to add apt keys instead.",
+  "message": "The 'apt_key' module is deprecated. Use ansible.builtin.get_url to fetch the key into /usr/share/keyrings instead.",
   "playbook": "ansible/playbooks/webservers.yml",
   "play": "Configure webservers",
   "task": "Add nginx signing key (DEPRECATED MODULE)"
@@ -39,7 +39,7 @@
       "dest": "/usr/share/keyrings/nginx-signing-keyring.gpg",
       "mode": "0644"
     },
-    "rationale": "apt_key was removed in ansible-core 2.18; fetch the key into /usr/share/keyrings instead."
+    "rationale": "apt_key is deprecated and slated for removal; fetch the key into /usr/share/keyrings and reference it explicitly instead."
   }
 }
 ```
@@ -50,7 +50,7 @@
 ```diff
 --- a/ansible/playbooks/webservers.yml
 +++ b/ansible/playbooks/webservers.yml
-@@ -10,10 +10,10 @@
+@@ -12,10 +12,10 @@
    become: true
    tasks:
      - name: Add nginx signing key (DEPRECATED MODULE)
@@ -66,7 +66,7 @@
          name: nginx
 ```
 
-- committed: `8a040aab7e63` → `ansible/playbooks/webservers.yml`
+- committed: `78c1c1cad607` → `ansible/playbooks/webservers.yml`
 
 ### Failure detected
 ```json
@@ -109,7 +109,7 @@
 +nginx_port: 8080
 ```
 
-- committed: `98f1936a1c6d` → `ansible/group_vars/all.yml`
+- committed: `8ac96969d222` → `ansible/group_vars/all.yml`
 
 ### Failure detected
 ```json
@@ -155,11 +155,11 @@
          web-02:
 ```
 
-- committed: `a84ec8f83a2c` → `ansible/inventory.yml`
+- committed: `50791278217d` → `ansible/inventory.yml`
 
 ## Iteration 1
 
-- Pipeline run log: `pipeline/runs/run-20260821-221842-iter1.log`
+- Pipeline run log: `pipeline/runs/run-20260822-203532-iter1.log`
 - Exit code: `0`
 - 0 failure(s) detected.
 
@@ -167,7 +167,7 @@
 
 ```
 PLAYBOOK: site.yml ***********************************
-PLAY [configure stack] : started at 2026-08-21 22:18:42
+PLAY [configure stack] : started at 2026-08-22 20:35:32
 
 PHASE A: Parse-time validation
 
@@ -212,8 +212,9 @@ EXIT CODE: 0
 
 ### Recent git log
 ```
-a84ec8f 2026-08-21 fix(inventory): rename host to match playbook expectation
-98f1936 2026-08-21 fix(vars): add missing variable to group_vars
-8a040aa 2026-08-21 fix(playbook): migrate deprecated module to modern equivalent
-a505615 2026-08-21 chore: reset to broken baseline
+5079127 2026-08-22 fix(inventory): rename host to match playbook expectation
+8ac9696 2026-08-22 fix(vars): add missing variable to group_vars
+78c1c1c 2026-08-22 fix(playbook): migrate deprecated module to modern equivalent
+56eeaff 2026-08-22 chore: reset to broken baseline
 ```
+

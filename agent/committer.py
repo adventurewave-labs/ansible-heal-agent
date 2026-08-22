@@ -46,7 +46,11 @@ def _scope_for_file(path: str) -> str:
 
 
 def _summary_for_type(ftype: str, diagnosis: dict) -> str:
-    if ftype == "unreachable_host":
+    # no_hosts_matched is what *real* Ansible produces for a stale host pattern;
+    # unreachable_host is the simulator's name for the same class. Without both,
+    # every real-runner host fix fell through to "apply automated fix" and the
+    # conventional-commit subjects only ever appeared under the mock.
+    if ftype in ("unreachable_host", "no_hosts_matched"):
         return "rename host to match playbook expectation"
     if ftype == "removed_module":
         return "migrate deprecated module to modern equivalent"

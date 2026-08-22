@@ -198,7 +198,7 @@ repeatedly proposes patches that don't actually fix the underlying problem.
 | NFR-6 | WON'T    | Agent does not perform multi-region failover or capacity planning. | n/a |
 
 Each MUST requirement is covered by at least one test and exercised end-to-end
-by `demo.py` in CI. The suite is 149 tests across `tests/test_agent.py`,
+by `demo.py` in CI. The suite is 160 tests across `tests/test_agent.py`,
 `test_safety.py`, `test_perturbation.py`, `test_real_ansible.py`,
 `test_config.py`, `test_cli.py` and `test_llm.py`.
 
@@ -206,13 +206,22 @@ by `demo.py` in CI. The suite is 149 tests across `tests/test_agent.py`,
 
 ## 7. Failure Scenarios Handled by MVP
 
-### 7.1 Scenario A — Stale Hostname (`unreachable_host`)
+### 7.1 Scenario A — Stale Hostname (`no_hosts_matched`)
 
 The playbook `ansible/playbooks/webservers.yml` targets host `web-server-01`, but
-`ansible/inventory.yml` lists the host as `web-01` (the pre-migration name). Real
-Ansible emits `UNREACHABLE! fatal: [web-server-01]: UNREACHABLE!` and exits 2. The
-mock runner reproduces this signature by resolving the hosts pattern against the
-inventory and emitting the unreachable failure when no match is found.
+`ansible/inventory.yml` lists the host as `web-01` (the pre-migration name).
+
+Measured against ansible-core 2.19: real Ansible prints `skipping: no hosts
+matched` on stdout, `[WARNING]: Could not match supplied host pattern, ignoring:
+web-server-01` on stderr, and exits **0**. A play that silently configured zero
+hosts looks like a healthy deployment to anything watching the exit code, which
+is the entire reason `pipeline/callback_plugins/heal_json.py` exists — the
+callback sees the event, and `run_real` reports it as a failure with exit 2.
+
+The mock runner emits an `UNREACHABLE` line with a nonzero exit instead. That is
+a divergence from real Ansible, documented in `pipeline/runner.py`'s docstring;
+the simulator's class name is `unreachable_host` and the real one is
+`no_hosts_matched`. Both map to the same fix.
 
 The LLM diagnoses the root cause as a stale inventory entry and proposes renaming
 `web-01` to `web-server-01` in `inventory.yml`. The deterministic fallback proposes
@@ -222,10 +231,19 @@ the identical fix.
 
 ### 7.2 Scenario B — Removed Module (`removed_module`)
 
-The playbook uses `ansible.builtin.apt_key` to add the nginx signing key, but
-`apt_key` was removed in `ansible-core 2.18`. Real Ansible emits
-`ERROR! couldn't resolve module action apt_key` at parse time. The mock runner
-detects the deprecated module name during its Phase A parse-time validation pass.
+The playbook uses `ansible.builtin.apt_key` to add the nginx signing key.
+
+Measured against ansible-core 2.19: `apt_key` still **resolves** — it is
+deprecated, not removed, and the module file ships with no `deprecated:` block.
+Only the underlying `apt-key` command is deprecated. So the fix the agent
+proposes for it is a modernisation, not a repair of a broken play, and the mock
+runner's parse-time rejection of it is simulation rather than reproduction.
+
+The module class *is* verified against the real binary, using
+`ansible.builtin.docker`, which genuinely does not resolve: real Ansible emits
+`ERROR! couldn't resolve module/action 'ansible.builtin.docker'` and exits **4**,
+before any callback fires — which is why the text scan exists alongside the
+callback. See `tests/test_real_ansible.py`.
 
 The LLM proposes replacing the task with `ansible.builtin.get_url` +
 `ansible.builtin.command` to fetch the key and add it to the keyring. The
@@ -381,7 +399,7 @@ diagnosis in the transcript.
 ### 12.2 References
 
 - Conventional Commits 1.0.0 specification — conventionalcommits.org
-- Ansible core 2.18 release notes — docs.ansible.com
+- ansible-core 2.19 module index and deprecation notices — docs.ansible.com
 - Anthropic Messages API — docs.anthropic.com
 - OpenRouter API reference — openrouter.ai/docs
 - asciinema / termtosvg — the demo recording toolchain
