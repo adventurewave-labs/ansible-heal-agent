@@ -9,8 +9,11 @@ Three modes, selected by the ``mode`` argument:
 
 ``dry-run``
     Run once, diagnose every failure and compute the patch it *would* apply,
-    write nothing, commit nothing. This is the mode to point at a repository
-    you do not yet trust the agent with.
+    write nothing into the target repository, commit nothing. This is the mode
+    to point at a repository you do not yet trust the agent with, so "write
+    nothing" is meant literally: run logs and the transcript are redirected to a
+    scratch directory outside the repo (see ``config.set_output_root``) rather
+    than being dropped into ``pipeline/runs/`` and ``transcripts/``.
 
 ``pr``
     PRD NFR-3. Patch and commit onto a fresh ``heal/<run-id>`` branch, push it,
@@ -126,9 +129,14 @@ def _diagnose_and_patch(failure: dict, use_llm: bool, transcript: Transcript | N
         return fix, diag, patch
     except patcher.PathNotAllowed as e:
         # Never retried: a denied path is a policy decision, not a bad guess.
+        # `fix` is deliberately returned as None so no caller commits it, but
+        # the target file still has to reach the report — otherwise the CLI
+        # renders "BLOCKED None:" and the operator cannot tell which write was
+        # refused.
         if transcript:
             transcript.patch_blocked(fix, str(e))
-        return None, diag, {"blocked_reason": str(e)}
+        return None, diag, {"blocked_reason": str(e),
+                            "target_file": (fix or {}).get("target_file")}
     except patcher.PatchError as e:
         if transcript:
             transcript.patch_failed(fix, str(e))
@@ -243,7 +251,8 @@ def _heal_dry_run(playbook, use_llm, transcript, result) -> HealResult:
         result.proposals.append(Proposal(
             failure=failure,
             diagnosis=diag,
-            target_file=(fix or {}).get("target_file"),
+            target_file=((fix or {}).get("target_file")
+                         or (patch or {}).get("target_file")),
             diff=(patch or {}).get("diff", ""),
             blocked_reason=blocked,
         ))
@@ -380,7 +389,11 @@ class Transcript:
         self._lines.append("")
 
     def diagnosis(self, failure: dict, diag: dict) -> None:
-        self._lines.append("**Diagnosis** (LLM" if self._use_llm else "**Diagnosis** (fallback)")
+        # Label by what actually produced the diagnosis, not by whether the LLM
+        # was *requested*: a run with --llm that fell back would otherwise be
+        # recorded as an LLM diagnosis.
+        used_llm = self._use_llm and "_fallback_reason" not in diag
+        self._lines.append("**Diagnosis** (LLM)" if used_llm else "**Diagnosis** (fallback)")
         if "_fallback_reason" in diag:
             self._lines.append(f"_LLM unavailable, used fallback: `{diag['_fallback_reason']}`_")
         self._lines.append("```json")
