@@ -42,6 +42,20 @@ class RunResult:
     succeeded_hosts: list[str] = field(default_factory=list)
 
 
+def _log_ref(log_path: Path) -> str:
+    """How a run log is referred to in a RunResult.
+
+    Repo-relative when the log lives inside the repo, which is the normal case
+    and keeps transcripts portable. Dry-run redirects logs to a scratch
+    directory outside the repo (so that "writes nothing" is true), and there
+    the absolute path is the only thing that resolves.
+    """
+    try:
+        return str(log_path.relative_to(repo_root()))
+    except ValueError:
+        return str(log_path)
+
+
 def _load_yaml(path: Path) -> dict:
     with path.open() as fh:
         return yaml.safe_load(fh) or {}
@@ -311,7 +325,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
 
     return RunResult(
         exit_code=rc,
-        log_path=str(log_path.relative_to(repo_root())),
+        log_path=_log_ref(log_path),
         failures=failures,
         succeeded_hosts=succeeded,
     )
@@ -424,7 +438,7 @@ def run_real(playbook_path: Path, run_id: str | None = None) -> RunResult:
 
     return RunResult(
         exit_code=rc,
-        log_path=str(log_path.relative_to(repo_root())),
+        log_path=_log_ref(log_path),
         failures=failures,
         succeeded_hosts=ok_hosts,
     )
