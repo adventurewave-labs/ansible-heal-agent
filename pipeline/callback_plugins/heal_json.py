@@ -111,7 +111,7 @@ class CallbackModule(CallbackBase):
         except OSError:
             pass
 
-    # ── events ────────────────────────────────────────────────────────
+    # ── events ──────────────────────────────────────────────────────
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
         if ignore_errors:
