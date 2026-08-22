@@ -217,3 +217,4 @@ EXIT CODE: 0
 78c1c1c 2026-08-22 fix(playbook): migrate deprecated module to modern equivalent
 56eeaff 2026-08-22 chore: reset to broken baseline
 ```
+
