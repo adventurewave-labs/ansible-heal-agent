@@ -1,0 +1,17 @@
+---
+# DB playbook — clean, should pass once webservers.yml is healed.
+
+- name: Configure db servers
+  hosts: db-01
+  become: true
+  tasks:
+    - name: Ensure postgresql is installed
+      ansible.builtin.apt:
+        name: postgresql
+        state: present
+
+    - name: Ensure postgresql is running
+      ansible.builtin.service:
+        name: postgresql
+        state: started
+        enabled: true

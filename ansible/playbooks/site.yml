@@ -1,0 +1,6 @@
+---
+# Master playbook — runs the web and db roles in sequence.
+# Called by pipeline/runner.py as:  mock-ansible-playbook ansible/playbooks/site.yml
+
+- import_playbook: webservers.yml
+- import_playbook: db.yml

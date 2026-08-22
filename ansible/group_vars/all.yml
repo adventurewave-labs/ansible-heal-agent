@@ -1,0 +1,11 @@
+---
+# Group vars for the whole fleet.
+# NOTE: nginx_port is intentionally MISSING from this file — the agent must
+# discover that the playbook references an undefined var and add it here.
+
+# Common settings
+ansible_python_interpreter: /usr/bin/python3
+env: production
+log_level: info
+
+# (nginx_port is intentionally omitted — see scenarios/missing_var.py)

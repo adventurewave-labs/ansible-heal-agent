@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" id="terminal" baseProfile="full" viewBox="0 0 800 512" width="800" version="1.1">
+    <defs>
+        <termtosvg:template_settings xmlns:termtosvg="https://github.com/nbedos/termtosvg">
+            <termtosvg:screen_geometry columns="100" rows="30"/>
+            <termtosvg:animation type="css"/>
+        </termtosvg:template_settings>
+        <style type="text/css" id="generated-style"><![CDATA[#screen {
+                font-family: 'DejaVu Sans Mono', monospace;
+                font-style: normal;
+                font-size: 14px;
+            }
+
+        text {
+            dominant-baseline: text-before-edge;
+            white-space: pre;
+        }
+    
+            :root {
+                --animation-duration: 10572ms;
+            }
+
+            @keyframes roll {
+                0.000%{transform:translateY(0px)}
+11.445%{transform:translateY(-544px)}
+12.249%{transform:translateY(-1088px)}
+13.451%{transform:translateY(-1632px)}
+16.468%{transform:translateY(-2176px)}
+16.487%{transform:translateY(-2720px)}
+16.534%{transform:translateY(-3264px)}
+45.044%{transform:translateY(-3808px)}
+53.594%{transform:translateY(-4352px)}
+81.990%{transform:translateY(-4896px)}
+90.541%{transform:translateY(-5440px)}
+100.000%{transform:translateY(-5440px)}
+            }
+
+            #screen_view {
+                animation-duration: 10572ms;
+                animation-iteration-count:infinite;
+                animation-name:roll;
+                animation-timing-function: steps(1,end);
+                animation-fill-mode: forwards;
+            }
+        ]]></style>
+        <style type="text/css" id="user-style">
+            /* The colors defined below are the default 16 colors used for rendering text of the terminal. Adjust
+               them as needed.
+               PowerShell colors based on https://en.wikipedia.org/wiki/ANSI_escape_code#Colors */
+            .foreground {fill: #cccccc;}
+            .background {fill: #0c0c0c;}
+            .color0 {fill: #0c0c0c;}
+            .color1 {fill: #c50f1f;}
+            .color2 {fill: #13a10e;}
+            .color3 {fill: #c19c00;}
+            .color4 {fill: #0037da;}
+            .color5 {fill: #881798;}
+            .color6 {fill: #3a96dd;}
+            .color7 {fill: #cccccc;}
+            .color8 {fill: #767676;}
+            .color9 {fill: #e74856;}
+            .color10 {fill: #16c60c;}
+            .color11 {fill: #f9f1a5;}
+            .color12 {fill: #3b78ff;}
+            .color13 {fill: #b4009e;}
+            .color14 {fill: #61d6d6;}
+            .color15 {fill: #f2f2f2;}
+        </style>
+    </defs>
+    <svg id="screen" width="800" height="510" viewBox="0 0 800 510" preserveAspectRatio="xMidYMin slice">
+    <rect class="background" height="100%" width="100%" x="0" y="0"/><defs><g id="g1"><text x="0" textLength="8" class="background"> </text></g><g id="g2"><text x="0" textLength="120" class="foreground">python3 demo.py</text></g><g id="g3"><text x="0" textLength="560" class="foreground">======================================================================</text></g><g id="g4"><text x="0" textLength="296" class="foreground"> ansible-heal-agent &#8212; end-to-end demo</text></g><g id="g5"><text x="0" textLength="616" class="foreground">[1/4] Seeding the broken baseline into scratch workspace .demo-workspace/ ...</text></g><g id="g6"><text x="0" textLength="352" class="foreground">      3 failures seeded. HEAD = 2a865143f0b3</text></g><g id="g7"><text x="0" textLength="776" class="foreground">[2/4] LLM bridge: DISABLED (no provider configured) &#8212; using the deterministic fallback diagnoser.</text></g><g id="g8"><text x="0" textLength="600" class="foreground">      Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY to exercise the LLM path.</text></g><g id="g9"><text x="0" textLength="344" class="foreground">[3/4] Running heal loop (max 3 retries) ...</text></g><g id="g10"><text x="0" textLength="496" class="foreground">      &#8594; success=True  iterations=1  final_exit=0  elapsed=0.3s</text></g><g id="g11"><text x="0" textLength="248" class="foreground">      Commits the agent landed:</text></g><g id="g12"><text x="0" textLength="672" class="foreground">        b2dd134 2026-08-21 fix(inventory): rename host to match playbook expectation</text></g><g id="g13"><text x="0" textLength="576" class="foreground">        3ba7584 2026-08-21 fix(vars): add missing variable to group_vars</text></g><g id="g14"><text x="0" textLength="704" class="foreground">        96e1b06 2026-08-21 fix(playbook): migrate deprecated module to modern equivalent</text></g><g id="g15"><text x="0" textLength="464" class="foreground">        2a86514 2026-08-21 chore: reset to broken baseline</text></g><g id="g16"><text x="0" textLength="216" class="foreground">[4/4] Saving transcript ...</text></g><g id="g17"><text x="0" textLength="472" class="foreground">      &#8594; .demo-workspace/transcripts/demo-20260821-221546.md</text></g><g id="g18"><text x="0" textLength="472" class="foreground">Done. Open the transcript to inspect the agent's reasoning.</text></g><g id="g19"><text x="0" textLength="328" class="foreground">$ git -C .demo-workspace log --oneline -4</text></g><g id="g20"><text x="0" textLength="640" class="foreground">b2dd134 (HEAD -&gt; main) fix(inventory): rename host to match playbook expectation</text></g><g id="g21"><text x="0" textLength="424" class="foreground">3ba7584 fix(vars): add missing variable to group_vars</text></g><g id="g22"><text x="0" textLength="552" class="foreground">96e1b06 fix(playbook): migrate deprecated module to modern equivalent</text></g><g id="g23"><text x="0" textLength="312" class="foreground">2a86514 chore: reset to broken baseline</text></g><g id="g24"><text x="0" textLength="328" class="foreground">$ git -C .demo-workspace show --stat HEAD</text></g><g id="g25"><text x="0" textLength="456" class="foreground">fix(inventory): rename host to match playbook expectation</text></g><g id="g26"><text x="0" textLength="232" class="foreground"> ansible/inventory.yml | 2 +-</text></g><g id="g27"><text x="0" textLength="368" class="foreground"> 1 file changed, 1 insertion(+), 1 deletion(-)</text></g></defs><g id="screen_view"><g><rect x="0" y="0" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="0"/></g><g><use xlink:href="#g2" y="544"/><rect x="0" y="561" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="561"/></g><g><use xlink:href="#g2" y="1088"/><use xlink:href="#g3" y="1105"/><use xlink:href="#g4" y="1122"/><use xlink:href="#g3" y="1139"/><use xlink:href="#g5" y="1173"/><rect x="0" y="1190" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="1190"/></g><g><use xlink:href="#g2" y="1632"/><use xlink:href="#g3" y="1649"/><use xlink:href="#g4" y="1666"/><use xlink:href="#g3" y="1683"/><use xlink:href="#g5" y="1717"/><use xlink:href="#g6" y="1734"/><use xlink:href="#g7" y="1768"/><use xlink:href="#g8" y="1785"/><use xlink:href="#g9" y="1819"/><rect x="0" y="1836" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="1836"/></g><g><use xlink:href="#g2" y="2176"/><use xlink:href="#g3" y="2193"/><use xlink:href="#g4" y="2210"/><use xlink:href="#g3" y="2227"/><use xlink:href="#g5" y="2261"/><use xlink:href="#g6" y="2278"/><use xlink:href="#g7" y="2312"/><use xlink:href="#g8" y="2329"/><use xlink:href="#g9" y="2363"/><use xlink:href="#g10" y="2397"/><use xlink:href="#g11" y="2431"/><rect x="0" y="2448" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="2448"/></g><g><use xlink:href="#g2" y="2720"/><use xlink:href="#g3" y="2737"/><use xlink:href="#g4" y="2754"/><use xlink:href="#g3" y="2771"/><use xlink:href="#g5" y="2805"/><use xlink:href="#g6" y="2822"/><use xlink:href="#g7" y="2856"/><use xlink:href="#g8" y="2873"/><use xlink:href="#g9" y="2907"/><use xlink:href="#g10" y="2941"/><use xlink:href="#g11" y="2975"/><use xlink:href="#g12" y="2992"/><use xlink:href="#g13" y="3009"/><use xlink:href="#g14" y="3026"/><use xlink:href="#g15" y="3043"/><use xlink:href="#g16" y="3077"/><rect x="0" y="3094" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="3094"/></g><g><use xlink:href="#g2" y="3264"/><use xlink:href="#g3" y="3281"/><use xlink:href="#g4" y="3298"/><use xlink:href="#g3" y="3315"/><use xlink:href="#g5" y="3349"/><use xlink:href="#g6" y="3366"/><use xlink:href="#g7" y="3400"/><use xlink:href="#g8" y="3417"/><use xlink:href="#g9" y="3451"/><use xlink:href="#g10" y="3485"/><use xlink:href="#g11" y="3519"/><use xlink:href="#g12" y="3536"/><use xlink:href="#g13" y="3553"/><use xlink:href="#g14" y="3570"/><use xlink:href="#g15" y="3587"/><use xlink:href="#g16" y="3621"/><use xlink:href="#g17" y="3638"/><use xlink:href="#g18" y="3672"/><rect x="0" y="3689" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="3689"/></g><g><use xlink:href="#g2" y="3808"/><use xlink:href="#g3" y="3825"/><use xlink:href="#g4" y="3842"/><use xlink:href="#g3" y="3859"/><use xlink:href="#g5" y="3893"/><use xlink:href="#g6" y="3910"/><use xlink:href="#g7" y="3944"/><use xlink:href="#g8" y="3961"/><use xlink:href="#g9" y="3995"/><use xlink:href="#g10" y="4029"/><use xlink:href="#g11" y="4063"/><use xlink:href="#g12" y="4080"/><use xlink:href="#g13" y="4097"/><use xlink:href="#g14" y="4114"/><use xlink:href="#g15" y="4131"/><use xlink:href="#g16" y="4165"/><use xlink:href="#g17" y="4182"/><use xlink:href="#g18" y="4216"/><use xlink:href="#g19" y="4250"/><rect x="0" y="4267" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="4267"/></g><g><use xlink:href="#g4" y="4352"/><use xlink:href="#g3" y="4369"/><use xlink:href="#g5" y="4403"/><use xlink:href="#g6" y="4420"/><use xlink:href="#g7" y="4454"/><use xlink:href="#g8" y="4471"/><use xlink:href="#g9" y="4505"/><use xlink:href="#g10" y="4539"/><use xlink:href="#g11" y="4573"/><use xlink:href="#g12" y="4590"/><use xlink:href="#g13" y="4607"/><use xlink:href="#g14" y="4624"/><use xlink:href="#g15" y="4641"/><use xlink:href="#g16" y="4675"/><use xlink:href="#g17" y="4692"/><use xlink:href="#g18" y="4726"/><use xlink:href="#g19" y="4760"/><use xlink:href="#g20" y="4777"/><use xlink:href="#g21" y="4794"/><use xlink:href="#g22" y="4811"/><use xlink:href="#g23" y="4828"/><rect x="0" y="4845" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="4845"/></g><g><use xlink:href="#g5" y="4913"/><use xlink:href="#g6" y="4930"/><use xlink:href="#g7" y="4964"/><use xlink:href="#g8" y="4981"/><use xlink:href="#g9" y="5015"/><use xlink:href="#g10" y="5049"/><use xlink:href="#g11" y="5083"/><use xlink:href="#g12" y="5100"/><use xlink:href="#g13" y="5117"/><use xlink:href="#g14" y="5134"/><use xlink:href="#g15" y="5151"/><use xlink:href="#g16" y="5185"/><use xlink:href="#g17" y="5202"/><use xlink:href="#g18" y="5236"/><use xlink:href="#g19" y="5270"/><use xlink:href="#g20" y="5287"/><use xlink:href="#g21" y="5304"/><use xlink:href="#g22" y="5321"/><use xlink:href="#g23" y="5338"/><use xlink:href="#g24" y="5372"/><rect x="0" y="5389" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="5389"/></g><g><use xlink:href="#g7" y="5440"/><use xlink:href="#g8" y="5457"/><use xlink:href="#g9" y="5491"/><use xlink:href="#g10" y="5525"/><use xlink:href="#g11" y="5559"/><use xlink:href="#g12" y="5576"/><use xlink:href="#g13" y="5593"/><use xlink:href="#g14" y="5610"/><use xlink:href="#g15" y="5627"/><use xlink:href="#g16" y="5661"/><use xlink:href="#g17" y="5678"/><use xlink:href="#g18" y="5712"/><use xlink:href="#g19" y="5746"/><use xlink:href="#g20" y="5763"/><use xlink:href="#g21" y="5780"/><use xlink:href="#g22" y="5797"/><use xlink:href="#g23" y="5814"/><use xlink:href="#g24" y="5848"/><use xlink:href="#g25" y="5865"/><use xlink:href="#g26" y="5899"/><use xlink:href="#g27" y="5916"/><rect x="0" y="5933" width="8" height="17" class="foreground"/><use xlink:href="#g1" y="5933"/></g></g></svg>
+</svg>

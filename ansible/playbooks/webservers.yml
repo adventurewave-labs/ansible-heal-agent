@@ -1,0 +1,34 @@
+---
+# Webservers playbook
+# Fails on three deliberately seeded issues:
+#   1. Targets host `web-server-01` which does NOT exist in inventory.yml
+#   2. Uses the removed `apt_key` module (deprecated in ansible-core 2.18+)
+#   3. References undefined var `nginx_port`
+
+- name: Configure webservers
+  hosts: web-server-01
+  become: true
+  tasks:
+    - name: Add nginx signing key (DEPRECATED MODULE)
+      ansible.builtin.apt_key:
+        url: https://nginx.org/keys/nginx_signing.key
+        state: present
+
+    - name: Ensure nginx is installed
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Render nginx site config
+      ansible.builtin.template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/default
+        vars:
+          listen_port: "{{ nginx_port }}"
+      notify: reload nginx
+
+  handlers:
+    - name: reload nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.tox/
+.pytest_cache/
+.coverage
+htmlcov/
+transcripts/*.md
+transcripts/*.json
+# docs/example-transcript.md is committed on purpose: it is the audit
+# artifact the README points at.
+pipeline/runs/*.log
+pipeline/runs/*.json
+.ansible-heal/
+*.tmp
+.DS_Store
+.demo-workspace/
