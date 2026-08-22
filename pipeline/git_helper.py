@@ -52,7 +52,22 @@ def commit(message: str, allow_empty: bool = False) -> str:
     return _git("rev-parse", "HEAD").stdout.strip()
 
 
+def has_commits() -> bool:
+    """False on a freshly initialised repo whose HEAD is unborn."""
+    return _git("rev-parse", "--verify", "HEAD").returncode == 0
+
+
 def current_branch() -> str:
+    """The checked-out branch name.
+
+    ``rev-parse --abbrev-ref HEAD`` prints the literal string ``HEAD`` on an
+    unborn branch, which PR mode then tried to check back out — leaving the
+    user on the heal branch with their base branch gone. ``symbolic-ref``
+    reports the real name before the first commit exists.
+    """
+    proc = _git("symbolic-ref", "--short", "HEAD")
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip()
     return _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
 

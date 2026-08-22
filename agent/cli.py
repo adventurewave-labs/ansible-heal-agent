@@ -91,6 +91,10 @@ def run(repo, playbook, max_retries, allowed_paths, dry_run,
                 # discarded before the proposal was built).
                 click.echo(f"BLOCKED: {p.blocked_reason}")
                 continue
+            if not p.target_file:
+                reason = p.diagnosis.get("_no_fix_reason") or p.diagnosis.get("diagnosis")
+                click.echo(f"NO FIX: {reason}")
+                continue
             click.echo(f"--- would edit {p.target_file} ---")
             click.echo(p.diff)
     elif mode == MODE_PR:
@@ -106,6 +110,11 @@ def run(repo, playbook, max_retries, allowed_paths, dry_run,
         # is the path for the modes that do not enumerate proposals.
         for reason in result.blocked:
             click.echo(f"BLOCKED: {reason}", err=True)
+        # A refusal is a result, not silence. Without this the operator saw a
+        # run that simply did less than expected, with the reason buried in the
+        # transcript JSON.
+        for reason in result.declined:
+            click.echo(f"NO FIX: {reason}", err=True)
 
     if t:
         t.footer(result)

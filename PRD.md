@@ -241,7 +241,9 @@ runner's parse-time rejection of it is simulation rather than reproduction.
 
 The module class *is* verified against the real binary, using
 `ansible.builtin.docker`, which genuinely does not resolve: real Ansible emits
-`ERROR! couldn't resolve module/action 'ansible.builtin.docker'` and exits **4**,
+`[ERROR]: couldn't resolve module/action 'ansible.builtin.docker'. This often
+indicates a misspelling, missing collection, or incorrect module path.` and
+exits **4**,
 before any callback fires — which is why the text scan exists alongside the
 callback. See `tests/test_real_ansible.py`.
 
@@ -256,10 +258,18 @@ includes the `apt-key add` step.
 ### 7.3 Scenario C — Undefined Variable (`undefined_variable`)
 
 The playbook's template task references `{{ nginx_port }}` in its `vars` block,
-but `nginx_port` is not defined in `ansible/group_vars/all.yml`. Real Ansible
-emits `FAILED! => msg=The task includes an option with an undefined variable
-'nginx_port'.` The mock runner detects this statically by collecting all
-template-var references and checking them against the loaded `group_vars`.
+but `nginx_port` is not defined in `ansible/group_vars/all.yml`.
+
+Measured against ansible-core 2.19: real Ansible emits `fatal: [web-01]:
+FAILED! => {"msg": "Task failed: … Error while resolving value for 'msg':
+'nginx_port' is undefined"}` and exits 2. The string `The task includes an
+option with an undefined variable` is the **mock runner's** phrasing, not
+Ansible's; `agent/log_scanner.py` carries both, and the callback plugin matches
+the real one on the event rather than the text.
+
+The mock detects this statically, by collecting template-var references and
+checking them against `group_vars` plus any `vars:` the play or task sets
+itself.
 
 The LLM proposes adding `nginx_port: 80` to `group_vars/all.yml`. The deterministic
 fallback proposes `nginx_port: 8080`. Both are valid; the agent accepts whichever

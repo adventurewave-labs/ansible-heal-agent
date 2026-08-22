@@ -100,6 +100,89 @@ def test_a_stalled_run_stops_instead_of_burning_its_retry_budget(
     assert result.iterations == 0, "should stop after the first fruitless pass"
 
 
+def test_dry_run_does_not_turn_a_plain_directory_into_a_git_repo(tmp_path, monkeypatch):
+    """--dry-run is the mode for a repo you have not decided to trust yet.
+
+    init_if_needed() ran before the mode dispatch, so pointing --dry-run at a
+    directory that was not a repo ran `git init`, `git add .` and committed —
+    sweeping in every unrelated file that happened to be there.
+    """
+    from agent import config
+    from agent.core import MODE_DRY_RUN
+    from scenarios import seed
+
+    target = tmp_path / "not-a-repo"
+    (target / "ansible").mkdir(parents=True)
+    monkeypatch.setattr(config, "_OVERRIDE", target.resolve())
+    for name, body in seed.baseline_files().items():
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    (target / "MY_NOTES.txt").write_text("unrelated\n")
+
+    heal(mode=MODE_DRY_RUN, use_llm=False)
+
+    assert not (target / ".git").exists(), "dry-run initialised a git repo"
+    assert (target / "MY_NOTES.txt").read_text() == "unrelated\n"
+
+
+def test_dry_run_as_a_library_writes_nothing_into_the_repo(scratch_repo):
+    """The scratch-artefact redirect lived only in the CLI, so heal() called
+    directly still dropped pipeline/runs/* into the target."""
+    from agent.core import MODE_DRY_RUN
+    before = _git(scratch_repo, "status", "--porcelain")
+
+    result = heal(mode=MODE_DRY_RUN, use_llm=False)
+
+    assert result.proposals
+    assert _git(scratch_repo, "status", "--porcelain") == before
+    assert not (scratch_repo / "pipeline").exists()
+    assert not (scratch_repo / "transcripts").exists()
+
+
+def test_pr_mode_with_nothing_to_fix_neither_pushes_nor_claims_success(
+        scratch_repo, monkeypatch):
+    """A declined diagnosis is not a commit.
+
+    `_no_fix()` returns {"action": "none"}, which apply_fix reports as ok, so
+    every caller treated it as a fix: PR mode pushed a branch identical to its
+    base, reported Success: True, and would have opened an empty pull request.
+    """
+    monkeypatch.setenv("ANSIBLE_HEAL_ALLOWED_PATHS", "")
+    result = heal(mode=MODE_PR, use_llm=False)
+
+    assert not result.success
+    assert not result.pushed
+    assert result.history[0].commits == [], "recorded a phantom commit"
+
+
+def test_pr_mode_refuses_a_repository_with_no_commits(tmp_path, monkeypatch):
+    """On an unborn HEAD, `rev-parse --abbrev-ref HEAD` prints "HEAD".
+
+    PR mode branched anyway, then tried to check "HEAD" back out, failed, and
+    discarded the failure — leaving the operator on the heal branch with their
+    base branch gone.
+    """
+    from agent import config
+    from scenarios import seed
+
+    target = tmp_path / "unborn"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=target, check=True)
+    for name, body in seed.baseline_files().items():
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    monkeypatch.setattr(config, "_OVERRIDE", target.resolve())
+
+    result = heal(mode=MODE_PR, use_llm=False)
+
+    assert not result.success
+    assert "no commits" in (result.push_error or "")
+    branches = _git(target, "branch", "--list")
+    assert "heal/" not in branches, "created a branch it could not return from"
+
+
 def test_two_plays_contending_for_one_host_do_not_oscillate(scratch_repo):
     """Regression: the rename rule assumed exactly one host-targeting play.
 
@@ -149,6 +232,32 @@ def test_the_refusal_names_the_play_that_still_needs_the_host(scratch_repo):
     assert diag["fix"]["action"] == "none"
     assert "other.yml" in diag["_no_fix_reason"], diag["_no_fix_reason"]
     assert "web-01" in diag["_no_fix_reason"]
+
+
+def test_a_symlink_cannot_smuggle_a_write_past_the_allowlist(scratch_repo):
+    """NFR-2 is checked on the resolved path, not just the declared one.
+
+    `ansible/group_vars/all.yml` is inside the write surface. If it is a
+    symlink to `shared/secrets.yml` — still inside the repo, so the traversal
+    gate passes — the bytes land outside `ansible/**`. And invisibly: the
+    committer stages the declared path, whose own content never changed.
+    """
+    outside = scratch_repo / "shared" / "secrets.yml"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("---\napi_token: keep-me\n")
+    before = outside.read_text()
+
+    declared = scratch_repo / "ansible" / "group_vars" / "all.yml"
+    declared.unlink()
+    declared.symlink_to("../../shared/secrets.yml")
+
+    with pytest.raises(patcher.PathNotAllowed) as exc:
+        patcher.apply_fix({"action": "set_yaml_key",
+                           "target_file": "ansible/group_vars/all.yml",
+                           "key": "nginx_port", "value": 8080})
+
+    assert "shared/secrets.yml" in str(exc.value), "the message must name where it resolved to"
+    assert outside.read_text() == before, "wrote outside the allowed surface"
 
 
 # ── dry run ────────────────────────────────────────────────────────

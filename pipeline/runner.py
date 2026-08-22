@@ -71,9 +71,58 @@ def _log_ref(log_path: Path) -> str:
         return str(log_path)
 
 
+class InputUnreadable(RuntimeError):
+    """A file the run needs is missing or is not parseable YAML."""
+
+
 def _load_yaml(path: Path) -> dict:
-    with path.open() as fh:
-        return yaml.safe_load(fh) or {}
+    """Load a YAML mapping, or raise InputUnreadable.
+
+    Previously this let FileNotFoundError and yaml.YAMLError escape to the CLI
+    as a traceback, so a repo missing ``group_vars/all.yml`` — or carrying one
+    typo — exited 1 with a stack trace instead of a reported failure.
+    """
+    try:
+        with path.open() as fh:
+            data = yaml.safe_load(fh)
+    except FileNotFoundError as e:
+        raise InputUnreadable(f"{_rel(path)} does not exist") from e
+    except OSError as e:
+        raise InputUnreadable(f"{_rel(path)} could not be read: {e}") from e
+    except yaml.YAMLError as e:
+        raise InputUnreadable(f"{_rel(path)} is not valid YAML: {e}") from e
+    if data is None:
+        return {}
+    if not isinstance(data, (dict, list)):
+        raise InputUnreadable(
+            f"{_rel(path)} is a {type(data).__name__}, not a YAML mapping")
+    return data
+
+
+#: Where group_vars may live. Kept in step with agent.diagnoser, which offers
+#: the same three; the runner used to hard-code all.yml and die without it.
+_GROUP_VARS_CANDIDATES = (
+    "ansible/group_vars/all.yml",
+    "ansible/group_vars/all.yaml",
+    "ansible/group_vars/all/main.yml",
+)
+
+
+def _load_group_vars() -> dict:
+    """Group vars, or an empty mapping. Absence is legal; a typo is not."""
+    for rel in _GROUP_VARS_CANDIDATES:
+        path = repo_root() / rel
+        if path.is_file():
+            return _load_yaml(path)
+    return {}
+
+
+def _rel(path: Path) -> str:
+    """``path`` relative to the repo when possible, for readable messages."""
+    try:
+        return str(path.relative_to(repo_root()))
+    except ValueError:
+        return str(path)
 
 
 def _expand_playbook(playbook_path: Path) -> list[dict]:
@@ -101,55 +150,98 @@ def _expand_playbook(playbook_path: Path) -> list[dict]:
     return expanded
 
 
-def _hosts_in_inventory(inv: dict, pattern: str) -> list[str]:
-    """Return the list of concrete host names matching an Ansible hosts pattern.
+#: Ansible pattern syntax this simulator does not implement. Seeing one of
+#: these is not evidence that the inventory is wrong, so the runner reports it
+#: as its own limitation rather than inventing a host failure.
+_UNSUPPORTED_PATTERN_CHARS = (":", "!", "&", "[", "~")
 
-    Supports: literal hostname, group name, 'all', and '*' wildcard.
+
+def _pattern_parts(pattern) -> list[str] | None:
+    """Split a ``hosts:`` value into the sub-patterns Ansible would union.
+
+    Accepts a string (optionally comma-separated) or a YAML list — both are
+    valid Ansible and both used to break this runner: a list raised
+    ``TypeError: unhashable type: 'list'``, and a comma-separated string
+    matched nothing, which the diagnoser then "fixed" by renaming an inventory
+    host to the literal pattern string, breaking a repo that had been green.
+
+    Returns ``None`` if any part uses syntax this simulator cannot evaluate.
     """
-    # Build a flat {host: meta} map from the inventory tree.
+    if isinstance(pattern, (list, tuple)):
+        parts = [str(p).strip() for p in pattern]
+    else:
+        parts = [p.strip() for p in str(pattern).split(",")]
+    parts = [p for p in parts if p]
+    if not parts:
+        return None
+    if any(any(c in p for c in _UNSUPPORTED_PATTERN_CHARS) for p in parts):
+        return None
+    return parts
+
+
+def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
+    """Return ``(hosts, groups)`` for an inventory tree.
+
+    Groups are collected from both the nested ``children:`` form and the flat
+    form (``webservers: {hosts: ...}`` directly under ``all``). Only the nested
+    form used to register, so a group pattern against a flat inventory looked
+    like a missing host on a repo real Ansible runs clean.
+    """
     flat: dict[str, dict] = {}
-
-    def walk(node):
-        if isinstance(node, dict):
-            for k, v in node.items():
-                if k == "hosts" and isinstance(v, dict):
-                    flat.update(v)
-                elif isinstance(v, dict):
-                    walk(v)
-
-    walk(inv.get("all", inv))
-
-    # Pattern resolution
-    if pattern == "all":
-        return list(flat.keys())
-    if pattern in flat:
-        return [pattern]
-    if "*" in pattern:
-        regex = re.compile("^" + pattern.replace("*", ".*") + "$")
-        return [h for h in flat if regex.match(h)]
-
-    # Group lookup
     groups: dict[str, list[str]] = {}
 
-    def collect_groups(node, prefix=""):
-        if isinstance(node, dict):
-            for k, v in node.items():
-                if k == "hosts" and isinstance(v, dict):
-                    return
-                if k == "children" and isinstance(v, dict):
-                    for gk, gv in v.items():
-                        gh = []
-                        if isinstance(gv, dict) and "hosts" in gv:
-                            gh = list(gv["hosts"].keys())
-                        groups[gk] = gh
-                elif isinstance(v, dict):
-                    collect_groups(v, prefix + k)
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        for k, v in node.items():
+            if k == "hosts" and isinstance(v, dict):
+                flat.update(v)
+            elif k == "children" and isinstance(v, dict):
+                for gk, gv in v.items():
+                    if isinstance(gv, dict):
+                        groups.setdefault(gk, [])
+                        groups[gk].extend((gv.get("hosts") or {}).keys())
+                        walk(gv)
+            elif isinstance(v, dict):
+                # Flat group: a mapping that itself carries hosts.
+                if isinstance(v.get("hosts"), dict):
+                    groups.setdefault(k, [])
+                    groups[k].extend(v["hosts"].keys())
+                walk(v)
 
-    collect_groups(inv.get("all", inv))
-    if pattern in groups:
-        return groups[pattern]
+    walk(inv.get("all", inv))
+    return flat, groups
 
-    return []  # pattern matched nothing → unreachable
+
+def _hosts_in_inventory(inv: dict, pattern) -> list[str] | None:
+    """Concrete host names matching an Ansible ``hosts:`` pattern.
+
+    Supports a literal hostname, a group name (nested or flat), ``all``, a
+    ``*`` wildcard, a comma-separated union, and a YAML list of any of those.
+    Returns ``None`` — meaning "this simulator cannot evaluate the pattern" —
+    rather than an empty list, so the caller never mistakes an unimplemented
+    pattern for a stale inventory entry.
+    """
+    parts = _pattern_parts(pattern)
+    if parts is None:
+        return None
+
+    flat, groups = _inventory_index(inv)
+
+    matched: list[str] = []
+    for part in parts:
+        if part == "all":
+            matched.extend(flat.keys())
+        elif part in flat:
+            matched.append(part)
+        elif part in groups:
+            matched.extend(groups[part])
+        elif "*" in part:
+            regex = re.compile("^" + part.replace("*", ".*") + "$")
+            matched.extend(h for h in flat if regex.match(h))
+
+    # De-duplicate, preserving order.
+    return list(dict.fromkeys(matched))
 
 
 def _check_removed_modules(task: dict) -> str | None:
@@ -201,7 +293,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     # Resolve playbook_path to absolute so relative_to(repo_root()) works from any cwd.
     playbook_path = playbook_path.resolve()
     inv = _load_yaml(repo_root() / "ansible" / "inventory.yml")
-    group_vars = _load_yaml(repo_root() / "ansible" / "group_vars" / "all.yml") or {}
+    group_vars = _load_group_vars()
     playbook = _expand_playbook(playbook_path)
 
     log_lines: list[str] = []
@@ -220,6 +312,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
         play_name = play.get("name", "<unnamed play>")
         play_source = play.get("_source_playbook", str(playbook_path.relative_to(repo_root())))
         tasks = play.get("tasks", [])
+        play_vars = play.get("vars") if isinstance(play.get("vars"), dict) else {}
 
         for task in tasks:
             task_name = task.get("name", "<unnamed task>")
@@ -248,9 +341,18 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
                 )
                 continue
 
-            # Undefined-var check (template vars)
+            task_vars = task.get("vars") if isinstance(task.get("vars"), dict) else {}
+            defined = {**group_vars, **play_vars, **task_vars}
+
+            # Undefined-var check (template vars).
+            #
+            # `defined` is group_vars plus anything the play or the task sets
+            # itself. Checking group_vars alone meant a variable the operator
+            # had set in a play-level `vars:` block looked undefined, and the
+            # agent committed a fabricated default for it into group_vars —
+            # silently overriding a value the operator had chosen.
             refs = _collect_template_vars(task)
-            undefined = [r for r in refs if r not in group_vars]
+            undefined = [r for r in refs if r not in defined]
             if undefined:
                 rc = 2
                 var = undefined[0]
@@ -286,26 +388,50 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
         hosts = _hosts_in_inventory(inv, target)
 
         log_lines.append(f"PLAY [{play_name}] *********************************************")
-        log_lines.append(f"TASK [target hosts pattern '{target}'] resolved to {len(hosts)} host(s)")
 
-        if not hosts:
-            # Hostname doesn't exist in inventory — emit UNREACHABLE
+        if hosts is None:
+            # The simulator cannot evaluate this pattern. Reporting it as a
+            # missing host would be a lie about the repository, and the
+            # diagnoser would act on that lie by renaming an inventory entry.
             rc = 2
-            fake_host = target if not target.startswith(("all", "*")) else "<unknown>"
             failures.append({
-                "type": "unreachable_host",
-                "host": fake_host,
-                "pattern": target,
-                "message": f"UNREACHABLE! fatal: [{fake_host}]: UNREACHABLE! "
-                           f"Host '{fake_host}' not found in inventory.",
+                "type": "unsupported_pattern",
+                "host": None,
+                "pattern": str(target),
+                "message": (f"the bundled simulator cannot evaluate the host pattern "
+                            f"{target!r}; run with PIPELINE_RUNNER=real to have "
+                            f"ansible-playbook resolve it"),
                 "playbook": play_source,
                 "play": play_name,
             })
             log_lines.append(
-                f"fatal: [{fake_host}]: UNREACHABLE! Host '{fake_host}' not found "
-                f"in inventory. Pattern '{target}' matched 0 hosts."
-            )
-            log_lines.append(f"PLAY RECAP: {fake_host} : ok=0  changed=0  unreachable=1  failed=0")
+                f"ERROR! simulator cannot evaluate host pattern {target!r}")
+            log_lines.append("")
+            continue
+
+        log_lines.append(f"TASK [target hosts pattern '{target}'] resolved to {len(hosts)} host(s)")
+
+        if not hosts:
+            # Pattern understood, matched nothing — a genuinely stale entry.
+            rc = 2
+            parts = _pattern_parts(target) or [str(target)]
+            for part in parts:
+                fake_host = part if not part.startswith(("all", "*")) else "<unknown>"
+                failures.append({
+                    "type": "unreachable_host",
+                    "host": fake_host,
+                    "pattern": part,
+                    "message": f"UNREACHABLE! fatal: [{fake_host}]: UNREACHABLE! "
+                               f"Host '{fake_host}' not found in inventory.",
+                    "playbook": play_source,
+                    "play": play_name,
+                })
+                log_lines.append(
+                    f"fatal: [{fake_host}]: UNREACHABLE! Host '{fake_host}' not found "
+                    f"in inventory. Pattern '{part}' matched 0 hosts."
+                )
+                log_lines.append(
+                    f"PLAY RECAP: {fake_host} : ok=0  changed=0  unreachable=1  failed=0")
             log_lines.append("")
             continue
 
@@ -478,9 +604,23 @@ def run_pipeline(playbook_path: Path | None = None, run_id: str | None = None) -
     and got a simulation would have no way to tell.
     """
     default_pb = repo_root() / "ansible" / "playbooks" / "site.yml"
-    if os.environ.get("PIPELINE_RUNNER", "mock") == "real":
-        return run_real(playbook_path or default_pb, run_id)
-    return run(playbook_path or default_pb, run_id)
+    try:
+        if os.environ.get("PIPELINE_RUNNER", "mock") == "real":
+            return run_real(playbook_path or default_pb, run_id)
+        return run(playbook_path or default_pb, run_id)
+    except InputUnreadable as e:
+        # A repo the agent cannot read is a finding about the repo, not a crash.
+        # This used to surface as a Python traceback and exit 1.
+        return RunResult(
+            exit_code=2,
+            log_path="",
+            failures=[{
+                "type": "unreadable_input",
+                "host": None,
+                "message": str(e),
+            }],
+            succeeded_hosts=[],
+        )
 
 
 if __name__ == "__main__":

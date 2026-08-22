@@ -78,6 +78,13 @@ These are implemented and tested, not planned.
 touched at all. Since the target path can come from an LLM, this is what stops a
 diagnosis proposing `agent/core.py` from being applied.
 
+The check runs twice: once on the path the diagnosis asked for, and again on
+the path it *resolves* to. Only checking the declared name made the allowlist
+bypassable by a symlink — `ansible/group_vars/all.yml` pointing at
+`shared/secrets.yml` is inside the write surface by name and outside it in
+fact, and the write would not even show up in git, because the committer stages
+the declared path whose own bytes never changed.
+
 ```console
 $ ansible-heal run --repo ~/infra --allowed-paths 'infra/**' --dry-run
 repo:  /home/you/infra
@@ -95,6 +102,8 @@ surface ['infra/**']. Set ANSIBLE_HEAL_ALLOWED_PATHS to widen it.
 
 BLOCKED: refusing to write ansible/inventory.yml: outside the allowed write
 surface ['infra/**']. Set ANSIBLE_HEAL_ALLOWED_PATHS to widen it.
+
+transcript: /tmp/ansible-heal-dryrun-z4bsk0d0/transcripts/run-20260822-2103.md
 
 Success: False  Iterations: 0  Final exit: 2
 ```
@@ -126,17 +135,30 @@ final status. [Example](docs/example-transcript.md).
 ## Where it declines
 
 A diagnoser that always produces a patch is indistinguishable from one that
-produces a wrong patch. These cases report and stop:
+produces a wrong patch. These cases report and stop — on the console, not only
+in the transcript:
 
-```
-no inventory host resembles 'web-server-01' (inventory has ['db-primary']);
-renaming an unrelated host would be a guess, so no fix is proposed
+```console
+$ ansible-heal run --repo ~/infra
+NO FIX: no inventory host resembles 'web-server-01' (inventory has
+['db-primary']); renaming an unrelated host would be a guess, so no fix is
+proposed
 ```
 
 - no inventory host close enough to the one the play targets
+- an inventory host another play still targets, where renaming it would break
+  that play
 - a module with no known replacement in `MODULE_REPLACEMENTS`
-- a variable that is already defined (it will not be overwritten)
+- a variable that is already defined — in `group_vars`, or on the play or the
+  task — will not be overwritten
+- a host pattern the bundled simulator cannot evaluate (`webservers:!db-01` and
+  friends). It says so and stops, rather than reporting a host that does not
+  exist; `PIPELINE_RUNNER=real` hands the pattern to Ansible itself
+- a file the run needs that is missing or is not parseable YAML
 - any failure class it has no rule for
+
+A refusal is a result. `heal()` returns them on `HealResult.declined`, and the
+CLI prints each one.
 
 A run that patches nothing stops immediately rather than burning its retry
 budget re-running a pipeline that cannot change.
@@ -192,7 +214,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 160 tests
+make test          # 174 tests
 make lint
 ```
 

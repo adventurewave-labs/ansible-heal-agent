@@ -21,27 +21,31 @@ $ ruff check .
 All checks passed!
 
 $ python3 -m pytest -q
-160 passed
+174 passed
 
-$ python3 -m pytest -q --cov=agent --cov=pipeline --cov=scenarios
-TOTAL  1482  234  530   98  81%
+$ python3 -m pytest -q --cov=agent --cov=pipeline
+TOTAL  1586  255  568  107  81%
 ```
 
-CI gates on `--cov-fail-under=78` for `agent` and `pipeline`.
+That is the command CI runs, and the one its `--cov-fail-under=78` gate applies
+to. Adding `--cov=scenarios` gives `TOTAL 1623 270 582 110 80%` — the previous
+version of this file printed the two-package totals under the three-package
+command, which is exactly the kind of thing this document exists to catch.
 
 | file | coverage |
 |---|---|
 | `agent/config.py` | 98% |
 | `agent/llm.py` | 97% |
-| `agent/committer.py` | 92% |
-| `pipeline/runner.py` | 87% |
-| `agent/cli.py` | 84% |
+| `agent/pipeline_restarter.py` | 90% |
+| `pipeline/runner.py` | 89% |
+| `agent/committer.py` | 88% |
 | `agent/yaml_edit.py` | 83% |
+| `agent/cli.py` | 81% |
 | `agent/log_scanner.py` | 81% |
 | `agent/patcher.py` | 80% |
-| `agent/core.py` | 71% |
-| `pipeline/git_helper.py` | 67% |
+| `agent/core.py` | 70% |
 | `agent/diagnoser.py` | 67% |
+| `pipeline/git_helper.py` | 67% |
 
 The three lowest are named deliberately rather than omitted: `core.py`'s
 uncovered lines are mostly `Transcript` formatting, `git_helper.py` is the
@@ -76,7 +80,14 @@ The program output itself is real and unedited.
 ## Generalisation
 
 The single most important result, because the previous implementation could not
-do it. `tests/test_perturbation.py` varies the undefined-variable name, the
+do it. `tests/test_runner_inputs.py` is the counterpart to this section: nine cases for
+repositories that are *not* the seeded baseline — comma-separated and
+list-valued `hosts:`, flat inventory groups, absent group_vars, unparseable
+playbooks, a missing imported playbook, an unsupported pattern, and a variable
+set at play level. Every one of them used to end in a traceback, a crash, or a
+confident "fix" applied to a working repository.
+
+`tests/test_perturbation.py` varies the undefined-variable name, the
 inventory/playbook host-name pair, and the module. It is **38 tests, of which
 26 require convergence** — 8 variable names, 4 host pairs, 2 modules and 12
 combinations. The other 12 are the counterweight: 8 pin the inferred defaults
@@ -131,6 +142,17 @@ Asserted as properties, not by inspection:
   and land a junk commit per iteration
 - the callback and the text scan de-duplicate per failure class, so one failure
   yields one diagnosis
+- the write allowlist is re-checked on the **resolved** path, so a symlink
+  inside the write surface cannot smuggle a write outside it
+- `--dry-run` does not create a git repository in a target that had none, and
+  does not commit — `heal()` called as a library gets the same guarantee, not
+  just the CLI
+- a declined diagnosis is not a commit: PR mode with nothing to fix neither
+  pushes a branch nor reports success, and the retry budget is not spent
+- PR mode refuses a repository with no commits rather than branching off an
+  unborn HEAD and losing the base branch
+- a host pattern the simulator cannot evaluate is reported as such, not as a
+  missing host, so the diagnoser never "fixes" a repository that was green
 - the test suite leaves `git status --porcelain` empty — enforced in CI
 
 ## Known gaps
