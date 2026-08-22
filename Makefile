@@ -9,7 +9,7 @@ DEMO    := demo.py
 help:
 	@echo "ansible-heal-agent — autonomous Ansible healer"
 	@echo ""
-	@echo "  make install    Install Python deps"
+	@echo "  make install    Install deps and the ansible-heal CLI"
 	@echo "  make demo       Run the end-to-end demo (writes a transcript)"
 	@echo "  make reset-seed Reset the repo to the broken baseline state"
 	@echo "  make test       Run pytest suite (uses scratch repos; never touches your tree)"
@@ -18,6 +18,9 @@ help:
 
 install:
 	$(PIP) install -r requirements.txt
+	# requirements.txt covers the dependencies; this puts the `ansible-heal`
+	# console script on PATH. Without it the documented CLI does not exist.
+	$(PIP) install -e .
 
 reset-seed:
 	$(PY) -m scenarios.seed --reset
