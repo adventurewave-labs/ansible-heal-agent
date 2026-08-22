@@ -56,7 +56,7 @@ class CallbackModule(CallbackBase):
         #: name what failed to match, and the diagnoser has nothing to act on.
         self._current_pattern: str | None = None
 
-    # ── helpers ──────────────────────────────────────────────
+    # ── helpers ──────────────────────────────────────────────────────
 
     @staticmethod
     def _msg(result) -> str:
@@ -103,7 +103,7 @@ class CallbackModule(CallbackBase):
         except OSError:
             pass
 
-    # ── events ───────────────────────────────────────────────
+    # ── events ───────────────────────────────────────────────────────
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
         if ignore_errors:
