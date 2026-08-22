@@ -9,9 +9,10 @@ patches the offending inventory / playbooks / vars, commits the fix, and re-runs
 </p>
 
 <p align="center">
-  <em>A real <code>asciinema</code> recording of <code>make demo</code>: three seeded
-  failures, three conventional commits, pipeline green. Not a mock-up — the
-  SHAs in the <code>git log</code> are the ones that run produced.</em>
+  <em>Real, unedited output from <code>make demo</code>, captured with
+  <code>asciinema</code> via a scripted driver: three seeded failures, three
+  conventional commits, pipeline green. The SHAs in the <code>git log</code> are
+  the ones that run produced.</em>
 </p>
 
 [![CI](https://github.com/adventurewave-labs/ansible-heal-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/adventurewave-labs/ansible-heal-agent/actions/workflows/ci.yml)
@@ -86,9 +87,20 @@ artefacts:     /tmp/ansible-heal-dryrun-z4bsk0d0  (nothing is written to the rep
 
 3 proposal(s); nothing written.
 
+BLOCKED: refusing to write ansible/playbooks/webservers.yml: outside the allowed
+write surface ['infra/**']. Set ANSIBLE_HEAL_ALLOWED_PATHS to widen it.
+
+BLOCKED: refusing to write ansible/group_vars/all.yml: outside the allowed write
+surface ['infra/**']. Set ANSIBLE_HEAL_ALLOWED_PATHS to widen it.
+
 BLOCKED: refusing to write ansible/inventory.yml: outside the allowed write
 surface ['infra/**']. Set ANSIBLE_HEAL_ALLOWED_PATHS to widen it.
+
+Success: False  Iterations: 0  Final exit: 2
 ```
+
+One line per refused write — three proposals, three refusals. Line wrapping
+above is this document's; the real output does not wrap.
 
 **Three modes.**
 
@@ -108,7 +120,7 @@ check is keyed on the file suffix, so it covers every file the agent currently
 knows how to edit — inventory, playbooks, `group_vars` — and would not cover a
 non-YAML target such as a `.j2` template if a future fix class introduced one.
 
-**Every run leaves a transcript** — failures, diagnoses, diffs, commit SHAs,
+**Every CLI run leaves a transcript** (unless `--no-transcript`) — failures, diagnoses, diffs, commit SHAs,
 final status. [Example](docs/example-transcript.md).
 
 ## Where it declines
@@ -160,9 +172,13 @@ says so rather than implying a model was involved.
 from two sources, because neither sees everything: a
 [callback plugin](pipeline/callback_plugins/heal_json.py) for runtime events,
 and a text scan for parse-time errors, which abort before any callback fires.
-The two overlap on the no-hosts case — both see it — so the records are
-de-duplicated on `(type, host, variable-or-module)` and the operator gets one
-diagnosis per failure, not two.
+The two overlap — a no-hosts warning and an undefined variable are both visible
+to each — so records are de-duplicated on whatever that failure class's *fix* is
+keyed on: the variable name for an undefined variable, the module for a removed
+one, the pattern for a host. Keying them all on `(type, host, …)` looked right
+and silently failed for variables, because the text scan's record carries no
+host; the operator got two identical proposals and a spurious "already defined"
+patch failure.
 
 Exit codes are interpreted by what the pipeline *means*: a play skipped because
 its host pattern matched nothing exits 0 in real Ansible, and is reported here
@@ -176,7 +192,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 156 tests
+make test          # 160 tests
 make lint
 ```
 

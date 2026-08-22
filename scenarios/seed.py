@@ -57,7 +57,9 @@ WEBSERVERS_BROKEN = """\
 # Webservers playbook
 # Fails on three deliberately seeded issues:
 #   1. Targets host `web-server-01` which does NOT exist in inventory.yml
-#   2. Uses the removed `apt_key` module (deprecated in ansible-core 2.18+)
+#   2. Uses the deprecated `apt_key` module. The mock runner treats it as
+#      unresolvable; real ansible-core 2.19 still resolves it, so against the
+#      real binary this class is exercised with `docker` instead.
 #   3. References undefined var `nginx_port`
 
 - name: Configure webservers

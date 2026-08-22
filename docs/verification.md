@@ -1,8 +1,11 @@
 # Verification report
 
-**Date:** 2026-08-21
+**Date:** 2026-08-22
 **Commit under test:** the tip of this branch
-**Method:** fresh clone, `pip install -r requirements.txt`, commands run as shown.
+**Method:** fresh clone, `make install`, commands run as shown and their real
+output pasted back. Every number below was measured on the run that produced
+this file; where a figure is not measurable here it says so instead of
+guessing.
 
 This replaces the previous `UAT-report.md`, which reported 16/16 PASS against
 the one seeded baseline the agent was tuned for, cited a commit SHA that is not
@@ -18,22 +21,32 @@ $ ruff check .
 All checks passed!
 
 $ python3 -m pytest -q
-149 passed
+160 passed
 
 $ python3 -m pytest -q --cov=agent --cov=pipeline --cov=scenarios
-TOTAL  1448  249  510  95  80%
+TOTAL  1482  234  530   98  81%
 ```
+
+CI gates on `--cov-fail-under=78` for `agent` and `pipeline`.
 
 | file | coverage |
 |---|---|
 | `agent/config.py` | 98% |
 | `agent/llm.py` | 97% |
-| `agent/committer.py` | 96% |
+| `agent/committer.py` | 92% |
 | `pipeline/runner.py` | 87% |
+| `agent/cli.py` | 84% |
 | `agent/yaml_edit.py` | 83% |
-| `agent/cli.py` | 83% |
 | `agent/log_scanner.py` | 81% |
-| `agent/patcher.py` | 79% |
+| `agent/patcher.py` | 80% |
+| `agent/core.py` | 71% |
+| `pipeline/git_helper.py` | 67% |
+| `agent/diagnoser.py` | 67% |
+
+The three lowest are named deliberately rather than omitted: `core.py`'s
+uncovered lines are mostly `Transcript` formatting, `git_helper.py` is the
+thinnest-tested module in the repo, and `diagnoser.py`'s LLM branch is only
+exercised with a provider configured.
 
 ## End to end
 
@@ -46,24 +59,32 @@ $ make demo
 [3/4] Running heal loop (max 3 retries) ...
       → success=True  iterations=1  final_exit=0  elapsed=0.3s
       Commits the agent landed:
-        b2dd134 fix(inventory): rename host to match playbook expectation
-        3ba7584 fix(vars): add missing variable to group_vars
-        96e1b06 fix(playbook): migrate deprecated module to modern equivalent
-        2a86514 chore: reset to broken baseline
+        d53fc0e 2026-08-22 fix(inventory): rename host to match playbook expectation
+        dea60fc 2026-08-22 fix(vars): add missing variable to group_vars
+        e879c40 2026-08-22 fix(playbook): migrate deprecated module to modern equivalent
+        34d5e05 2026-08-22 chore: reset to broken baseline
 ```
 
-`docs/demo.cast` is the asciinema recording of this command and `docs/demo.svg`
-is it rendered. The SHAs in them are the ones that run produced.
+`docs/demo.cast` is an asciinema capture of the same command from an earlier
+run, and `docs/demo.svg` is that cast rendered by termtosvg. The SHAs in them
+are the ones *that* run produced, so they differ from the block above — the
+demo reseeds from scratch each time. The capture was driven by a script rather
+than typed at a live prompt: the `$ ` prefixes on the two trailing `git`
+commands are printed by the driver, and the pauses between them are scripted.
+The program output itself is real and unedited.
 
 ## Generalisation
 
 The single most important result, because the previous implementation could not
 do it. `tests/test_perturbation.py` varies the undefined-variable name, the
-inventory/playbook host-name pair, and the module, and requires convergence for
-every combination — 38 cases.
+inventory/playbook host-name pair, and the module. It is **38 tests, of which
+26 require convergence** — 8 variable names, 4 host pairs, 2 modules and 12
+combinations. The other 12 are the counterweight: 8 pin the inferred defaults
+and 4 assert the agent refuses rather than guessing.
 
-The specific regression that motivated the suite (rename `nginx_port` to
-`app_port`, `web-server-01` to `web-node-01`):
+The specific regression that motivated the suite, reproduced ad hoc rather than
+as a fixture (rename `nginx_port` to `app_port` and the host pair away from the
+seeded names):
 
 | | before | after |
 |---|---|---|
@@ -73,7 +94,7 @@ The specific regression that motivated the suite (rename `nginx_port` to
 
 ## Real `ansible-playbook`
 
-`tests/test_real_ansible.py` — 9 cases against ansible-core 2.19.12, no
+`tests/test_real_ansible.py` — 16 tests against ansible-core 2.19.12, no
 simulator involved.
 
 | case | real ansible behaviour | result |
@@ -82,7 +103,13 @@ simulator involved.
 | undefined variable | `'nginx_port' is undefined`, exit 2 | detected, variable name recovered |
 | unresolvable module | `couldn't resolve module/action`, **exit 4**, aborts before callbacks | detected via text scan |
 | clean playbook | exit 0 | reported green, host in `succeeded_hosts` |
-| full heal | — | converges; verified by re-running `ansible-playbook` directly and asserting exit 0 |
+| full heal, host class | — | converges; verified by re-running `ansible-playbook` directly and asserting exit 0 |
+| full heal, variable class | — | converges; same direct re-run check |
+| module class | — | swap lands and Ansible stops looking for the old module. Does **not** reach green: `community.docker` is a Galaxy collection, and installing it is the operator's call. The stall detector is asserted to stop rather than re-propose |
+
+`apt_key`, the module in the seeded scenario, is **not** part of the real-Ansible
+evidence: on 2.19 it still resolves, so the mock's parse-time rejection of it is
+simulation. `docker` is what the real checks use.
 
 ## Safety invariants
 
@@ -96,6 +123,14 @@ Asserted as properties, not by inspection:
 - `--require-human-approval` leaves the base branch at the **same SHA**, puts
   exactly three commits on `heal/<id>`, does not re-run the pipeline, and checks
   the base branch back out
+- `--dry-run` writes nothing into the target repo at all — not a run log, not a
+  transcript; `git status --porcelain` in the target is byte-identical before
+  and after, and the artefacts land in a scratch dir outside it
+- a rename that would break another play still targeting the host is refused,
+  so two contending plays cannot make the agent rename an entry back and forth
+  and land a junk commit per iteration
+- the callback and the text scan de-duplicate per failure class, so one failure
+  yields one diagnosis
 - the test suite leaves `git status --porcelain` empty — enforced in CI
 
 ## Known gaps

@@ -2,8 +2,8 @@
 
 Every test that touches the filesystem or git runs against a throwaway repo
 under pytest's ``tmp_path``. Nothing in the suite may write to, or commit to,
-the developer's checkout — that was the old behaviour and it added 73 junk
-commits to this repository's history before it was caught.
+the developer's checkout — that was the old behaviour, and it added dozens of
+junk commits to this repository's history before it was caught.
 """
 
 from __future__ import annotations

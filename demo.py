@@ -4,9 +4,10 @@
 By default the demo runs against a scratch workspace under ``.demo-workspace/``
 rather than against this checkout. That matters: the agent's job is to *commit*
 its fixes, and earlier versions of this demo committed them straight into this
-repository — which is how 73 "chore: reset to broken baseline" commits ended up
-in its history. The scratch workspace is a real git repo, so the demo still
-shows real commits; they just land somewhere disposable.
+repository — which is how dozens of "chore: reset to broken baseline" commits
+ended up in its history before that history was squashed away. The scratch
+workspace is a real git repo, so the demo still shows real commits; they just
+land somewhere disposable.
 
 Pass ``--in-place`` to run against this checkout instead (what CI does not do).
 """
