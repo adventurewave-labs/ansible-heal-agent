@@ -43,12 +43,19 @@ def real_repo(scratch_repo: Path, monkeypatch) -> Path:
     """
     monkeypatch.setenv("PIPELINE_RUNNER", "real")
 
+    # web-01 is the entry the host-rename fix is meant to correct, so nothing
+    # else may target it: renaming a host another play still needs is refused
+    # (and used to make the agent rename it back and forth every iteration).
     _write(scratch_repo, "ansible/inventory.yml", """
         all:
           children:
             webservers:
               hosts:
                 web-01:
+                  ansible_connection: local
+            apps:
+              hosts:
+                app-01:
                   ansible_connection: local
     """)
     _write(scratch_repo, "ansible/group_vars/all.yml", """
@@ -68,7 +75,7 @@ def real_repo(scratch_repo: Path, monkeypatch) -> Path:
     # Play 2: undefined variable. Real ansible exits 2.
     _write(scratch_repo, "ansible/playbooks/vars.yml", """
         - name: Render config
-          hosts: web-01
+          hosts: app-01
           gather_facts: false
           tasks:
             - name: Render listen port
@@ -79,7 +86,7 @@ def real_repo(scratch_repo: Path, monkeypatch) -> Path:
     # callback ever fires.
     _write(scratch_repo, "ansible/playbooks/module.yml", """
         - name: Legacy module
-          hosts: web-01
+          hosts: app-01
           gather_facts: false
           tasks:
             - name: Removed module
@@ -96,7 +103,7 @@ def _run(repo: Path, playbook: str):
     return runner.run_pipeline(repo / "ansible" / "playbooks" / playbook)
 
 
-# ── detection ───────────────────────────────────────────────────────
+# ── detection ──────────────────────────────────────────────────────
 
 def test_real_runner_detects_a_host_pattern_that_matches_nothing(real_repo):
     """The case the old regexes could never catch: real ansible exits 0."""
@@ -141,7 +148,23 @@ def test_real_runner_detects_an_undefined_variable_with_its_name(real_repo):
     undefined = [f for f in result.failures if f["type"] == "undefined_variable"]
     assert undefined, result.failures
     assert undefined[0]["variable"] == "nginx_port"
-    assert undefined[0]["host"] == "web-01"
+    assert undefined[0]["host"] == "app-01"
+
+
+def test_an_undefined_variable_is_reported_once(real_repo):
+    """Regression: the callback and the text scan both see this class too.
+
+    De-duplication keyed on (type, host, ...), but the text scan's
+    undefined-variable record carries no host at all, so the two never
+    collapsed. The operator got two identical proposals in dry-run, and in
+    apply mode a spurious "'nginx_port' is already defined" patch failure when
+    the second copy was acted on.
+    """
+    result = _run(real_repo, "vars.yml")
+
+    undefined = [f for f in result.failures if f["type"] == "undefined_variable"]
+    assert len(undefined) == 1, f"expected one record, got {undefined}"
+    assert undefined[0]["variable"] == "nginx_port"
 
 
 def test_real_runner_detects_a_parse_time_module_error(real_repo):
@@ -204,6 +227,22 @@ def test_agent_heals_a_real_ansible_run(real_repo):
         cwd=real_repo, capture_output=True, text=True, check=False)
     assert proc.returncode == 0
     assert "ok=1" in proc.stdout
+
+
+def test_a_real_host_fix_gets_a_real_commit_subject(real_repo):
+    """Regression: the real runner's class name fell through to a generic subject.
+
+    _summary_for_type knew `unreachable_host` (the simulator's name) but not
+    `no_hosts_matched` (what real Ansible produces), so every real-runner host
+    fix committed as "fix(inventory): apply automated fix" while the docs
+    advertised the conventional-commit subject.
+    """
+    heal(playbook="ansible/playbooks/site.yml", max_retries=3, use_llm=False)
+
+    subjects = subprocess.run(["git", "log", "--format=%s"], cwd=real_repo,
+                              capture_output=True, text=True).stdout
+    assert "fix(inventory): rename host to match playbook expectation" in subjects
+    assert "apply automated fix" not in subjects, subjects
 
 
 def test_agent_heals_an_undefined_variable_against_real_ansible(real_repo):

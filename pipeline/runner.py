@@ -1,17 +1,32 @@
 """Mock ansible-playbook runner.
 
 Parses the in-repo playbooks and inventory, walks the tasks, and emits log
-lines that mirror real Ansible output for three well-known failure classes:
+lines in the *shape* of Ansible output for three failure classes:
 
   1. Stale hostname       → "UNREACHABLE! fatal: [web-server-01]: UNREACHABLE! ..."
   2. Removed module       → "ERROR! couldn't resolve module action 'apt_key' ..."
   3. Undefined variable   → "fatal: [web-01]: FAILED! => msg=The task includes an
                               option with an undefined variable 'nginx_port'."
 
-Exit codes mirror real Ansible:
+Where this simulator and real ansible-core diverge — read this before trusting
+a mock log as evidence of real behaviour:
+
+* A host pattern matching nothing is reported here as ``UNREACHABLE`` with a
+  nonzero exit. Real ansible-core warns and exits **0**, which is precisely why
+  ``pipeline/callback_plugins/heal_json.py`` exists. ``run_real`` classifies it
+  as ``no_hosts_matched``.
+* ``apt_key`` is treated here as unresolvable so the seeded scenario has a
+  module class to exercise. On ansible-core 2.19 it still resolves — it is
+  deprecated, not removed — so the replacement the agent proposes for it is a
+  modernisation. ``docker`` is the module that genuinely does not resolve, and
+  it is what ``tests/test_real_ansible.py`` uses against the real binary.
+
+Exit codes this runner emits:
   0  → success
-  2  → task failure (one or more hosts failed)
-  1  → playbook parse error
+  2  → one or more failures detected
+
+Real ansible-core also uses 4 for a parse-time error, which this runner never
+produces; ``agent.log_scanner`` handles that case from real output.
 
 The runner writes a timestamped log to ``pipeline/runs/run-<ts>.log`` and
 also returns the log path so the agent can pick it up immediately.
@@ -139,10 +154,12 @@ def _hosts_in_inventory(inv: dict, pattern: str) -> list[str]:
 
 def _check_removed_modules(task: dict) -> str | None:
     """Return error string if the task uses a removed module."""
+    # Simulated only. See the module docstring: on ansible-core 2.19 apt_key
+    # still resolves, so a real run would not produce this error for it.
     REMOVED = {
-        "apt_key": "The 'apt_key' module was removed in ansible-core 2.18. "
-                   "Use ansible.builtin.get_url + ansible.builtin.command "
-                   "to add apt keys instead.",
+        "apt_key": "The 'apt_key' module is deprecated. Use "
+                   "ansible.builtin.get_url to fetch the key into "
+                   "/usr/share/keyrings instead.",
         "docker": "The 'docker' module was removed. Use community.docker.docker_container.",
     }
     for key in task:
@@ -196,7 +213,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
 
     rc = 0
 
-    # ── Phase A: parse-time validation ─────────────────────────────────────
+    # ── Phase A: parse-time validation ───────────────────────────────────
     parse_failures_by_task: dict[tuple[str, str], list[dict]] = {}
     for play in playbook:
         target = play.get("hosts", "all")
@@ -227,8 +244,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
                 failures.append(f)
                 parse_failures_by_task.setdefault(key, []).append(f)
                 log_lines.append(
-                    f"ERROR! couldn't resolve module action '{f['module']}'. "
-                    f"The module was removed in ansible-core 2.18."
+                    f"ERROR! couldn't resolve module action '{f['module']}'."
                 )
                 continue
 
@@ -260,7 +276,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     log_lines.append("PHASE B: Runtime execution")
     log_lines.append("")
 
-    # ── Phase B: runtime execution ───────────────────────────────────────
+    # ── Phase B: runtime execution ─────────────────────────────────────
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
@@ -343,14 +359,24 @@ def _merge_failures(primary: list[dict], extra: list[dict]) -> list[dict]:
     """Merge two failure lists, dropping duplicates.
 
     The callback sidecar and the text scan overlap for runtime failures; they
-    must not both be reported. Identity is (type, host, variable-or-module).
+    must not both be reported. Two records are the same failure when they would
+    produce the same fix, so identity is keyed on whatever that class's fix is
+    keyed on — not on a single fixed tuple. A flat (type, host, ...) key missed
+    the undefined-variable case entirely: the text scan's record carries no
+    host, so it never collapsed against the callback's, and the operator got two
+    identical proposals and a spurious "already defined" patch failure.
     """
     def key(f: dict) -> tuple:
-        return (
-            f.get("type"),
-            f.get("host"),
-            f.get("variable") or f.get("module_short") or f.get("module"),
-        )
+        t = f.get("type")
+        if t == "undefined_variable":
+            # One definition in group_vars fixes it for every host.
+            return (t, f.get("variable"))
+        if t == "removed_module":
+            # One module swap fixes it wherever the module is used.
+            return (t, f.get("module_short") or f.get("module"))
+        if t in ("no_hosts_matched", "unreachable_host"):
+            return (t, f.get("pattern") or f.get("host"))
+        return (t, f.get("host"), f.get("task"))
 
     seen = {key(f) for f in primary}
     merged = list(primary)
