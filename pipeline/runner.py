@@ -213,7 +213,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
 
     rc = 0
 
-    # ── Phase A: parse-time validation ───────────────────────────────────
+    # ── Phase A: parse-time validation ─────────────────────────────────────
     parse_failures_by_task: dict[tuple[str, str], list[dict]] = {}
     for play in playbook:
         target = play.get("hosts", "all")
@@ -276,7 +276,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     log_lines.append("PHASE B: Runtime execution")
     log_lines.append("")
 
-    # ── Phase B: runtime execution ─────────────────────────────────────
+    # ── Phase B: runtime execution ────────────────────────────────────────
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")

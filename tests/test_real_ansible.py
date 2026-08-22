@@ -103,7 +103,7 @@ def _run(repo: Path, playbook: str):
     return runner.run_pipeline(repo / "ansible" / "playbooks" / playbook)
 
 
-# ── detection ──────────────────────────────────────────────────────
+# ── detection ───────────────────────────────────────────────────────
 
 def test_real_runner_detects_a_host_pattern_that_matches_nothing(real_repo):
     """The case the old regexes could never catch: real ansible exits 0."""
