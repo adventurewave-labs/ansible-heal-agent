@@ -1,6 +1,7 @@
 """CLI entrypoint — ``ansible-heal`` or ``python -m agent.cli``."""
 from __future__ import annotations
 
+import tempfile
 import time
 
 import click
@@ -35,8 +36,9 @@ def cli():
               help="Comma-separated globs the patcher may write to "
                    "[default: ansible/**]. An empty value denies all writes.")
 @click.option("--dry-run", is_flag=True, default=False,
-              help="Diagnose and show the diffs that would be applied. "
-                   "Writes nothing, commits nothing.")
+              help="Diagnose and show the diffs that would be applied. Writes "
+                   "nothing into the target repository and commits nothing; the "
+                   "run log and transcript go to a scratch directory outside it.")
 @click.option("--require-human-approval", is_flag=True, default=False,
               help="Commit fixes to a new heal/<run-id> branch, push it and open "
                    "a PR, then stop. The base branch is not modified and the "
@@ -58,6 +60,13 @@ def run(repo, playbook, max_retries, allowed_paths, dry_run,
     _apply_common(repo, allowed_paths)
     mode = MODE_DRY_RUN if dry_run else MODE_PR if require_human_approval else MODE_APPLY
 
+    # A dry run must leave the target repository byte-for-byte untouched — that
+    # is the entire point of pointing it at a repo you do not trust the agent
+    # with yet. Run logs and transcripts are still useful, so they are written
+    # outside the repo instead of being suppressed.
+    scratch = tempfile.mkdtemp(prefix="ansible-heal-dryrun-") if mode == MODE_DRY_RUN else None
+    config.set_output_root(scratch)
+
     ts = time.strftime("%Y%m%d-%H%M%S")
     t_path = config.transcripts_dir() / f"run-{ts}.md" if transcript else None
     t = Transcript(t_path, use_llm=not no_llm) if t_path else None
@@ -65,6 +74,8 @@ def run(repo, playbook, max_retries, allowed_paths, dry_run,
     click.echo(f"repo:  {config.repo_root()}")
     click.echo(f"mode:  {mode}")
     click.echo(f"write surface: {list(config.allowed_paths())}")
+    if scratch:
+        click.echo(f"artefacts:     {scratch}  (nothing is written to the repo)")
     click.echo("")
 
     result = heal(playbook=playbook, max_retries=max_retries,
@@ -75,7 +86,10 @@ def run(repo, playbook, max_retries, allowed_paths, dry_run,
         for p in result.proposals:
             click.echo("")
             if p.blocked_reason:
-                click.echo(f"BLOCKED {p.target_file}: {p.blocked_reason}")
+                # The reason already names the file; prefixing target_file too
+                # printed it twice (and printed "None" whenever the fix was
+                # discarded before the proposal was built).
+                click.echo(f"BLOCKED: {p.blocked_reason}")
                 continue
             click.echo(f"--- would edit {p.target_file} ---")
             click.echo(p.diff)
@@ -87,8 +101,11 @@ def run(repo, playbook, max_retries, allowed_paths, dry_run,
         if result.push_error:
             click.echo(f"note: {result.push_error}")
 
-    for reason in result.blocked:
-        click.echo(f"BLOCKED: {reason}", err=True)
+    if mode != MODE_DRY_RUN:
+        # Dry-run already printed each block above, with its target file; this
+        # is the path for the modes that do not enumerate proposals.
+        for reason in result.blocked:
+            click.echo(f"BLOCKED: {reason}", err=True)
 
     if t:
         t.footer(result)

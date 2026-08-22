@@ -21,11 +21,25 @@ patches the offending inventory / playbooks / vars, commits the fix, and re-runs
 Three failure classes, against **real `ansible-playbook`** or against a bundled
 simulator:
 
-| class | detected via | fix |
-|---|---|---|
-| host pattern matches nothing | callback plugin — real Ansible logs a *warning* and exits **0** | rename the closest inventory entry |
-| undefined variable | callback plugin (name extracted) | define it in `group_vars` with an inferred default |
-| unresolvable / removed module | text scan — parse errors abort before callbacks fire (exit 4) | swap the module, carrying its arguments over |
+| class | detected via | fix | verified against real Ansible |
+|---|---|---|---|
+| host pattern matches nothing | callback plugin — real Ansible logs a *warning* and exits **0** | rename the closest inventory entry | heals to green |
+| undefined variable | callback plugin (name extracted) | define it in `group_vars` with an inferred default | heals to green |
+| unresolvable / removed module | text scan — parse errors abort before callbacks fire (exit 4) | swap the module for its modern equivalent | rewrite verified; see below |
+
+The first two are asserted end to end in `tests/test_real_ansible.py`: real
+`ansible-playbook` fails, the agent patches, and the binary is run again and
+exits 0.
+
+The module class is honest about where it stops. The agent rewrites the module
+name and the run no longer fails on the old one — but the replacement for
+`docker` / `docker_container` lives in the `community.docker` **collection**, so
+the play only reaches green once that collection is installed. Installing it is
+the operator's call, not the agent's, and the stall detector stops the loop
+rather than re-proposing the same swap. Argument carry-over is per-module: the
+`docker` mappings pass the task's arguments through unchanged, while `apt_key`
+→ `get_url` deliberately rewrites them, because a keyring fetch does not take
+the same arguments as a key import.
 
 Anything else is reported, not guessed at. See
 [Where it declines](#where-it-declines).
@@ -33,7 +47,7 @@ Anything else is reported, not guessed at. See
 ## Quick start
 
 ```bash
-pip install -r requirements.txt
+make install    # deps, plus the `ansible-heal` CLI on your PATH
 make demo
 ```
 
@@ -43,7 +57,8 @@ it, and prints the commits it landed. It does **not** write to this checkout.
 Against your own repository:
 
 ```bash
-# See what it would do. Writes nothing, commits nothing.
+# See what it would do. Writes nothing into ~/infra and commits nothing;
+# the run log and transcript go to a scratch dir outside it, path printed.
 ansible-heal run --repo ~/infra --dry-run
 
 # Open a PR and stop. Your base branch is not touched.
@@ -64,7 +79,13 @@ diagnosis proposing `agent/core.py` from being applied.
 
 ```console
 $ ansible-heal run --repo ~/infra --allowed-paths 'infra/**' --dry-run
+repo:  /home/you/infra
+mode:  dry-run
 write surface: ['infra/**']
+artefacts:     /tmp/ansible-heal-dryrun-z4bsk0d0  (nothing is written to the repo)
+
+3 proposal(s); nothing written.
+
 BLOCKED: refusing to write ansible/inventory.yml: outside the allowed write
 surface ['infra/**']. Set ANSIBLE_HEAL_ALLOWED_PATHS to widen it.
 ```
@@ -73,7 +94,7 @@ surface ['infra/**']. Set ANSIBLE_HEAL_ALLOWED_PATHS to widen it.
 
 | mode | writes | commits | re-runs pipeline | touches base branch |
 |---|---|---|---|---|
-| `--dry-run` | no | no | no | no |
+| `--dry-run` | no — not even a run log; artefacts go to a scratch dir outside the repo | no | no | no |
 | `--require-human-approval` | yes | `heal/<run-id>` | **no** | no |
 | default | yes | current branch | yes | yes |
 
@@ -81,8 +102,11 @@ Approval mode commits to a new branch, pushes, opens a PR via `gh` if present,
 checks your branch back out, and stops. The pipeline is deliberately not re-run:
 the point is to hand a human a reviewable change, not to self-certify.
 
-**Every patch is validated before it is written.** If the result is not
-parseable YAML, nothing is written and the agent falls back or reports.
+**Every YAML patch is parsed before it is written.** If the result is not
+parseable YAML, nothing is written and the agent falls back or reports. The
+check is keyed on the file suffix, so it covers every file the agent currently
+knows how to edit — inventory, playbooks, `group_vars` — and would not cover a
+non-YAML target such as a `.j2` template if a future fix class introduced one.
 
 **Every run leaves a transcript** — failures, diagnoses, diffs, commit SHAs,
 final status. [Example](docs/example-transcript.md).
@@ -136,6 +160,9 @@ says so rather than implying a model was involved.
 from two sources, because neither sees everything: a
 [callback plugin](pipeline/callback_plugins/heal_json.py) for runtime events,
 and a text scan for parse-time errors, which abort before any callback fires.
+The two overlap on the no-hosts case — both see it — so the records are
+de-duplicated on `(type, host, variable-or-module)` and the operator gets one
+diagnosis per failure, not two.
 
 Exit codes are interpreted by what the pipeline *means*: a play skipped because
 its host pattern matched nothing exits 0 in real Ansible, and is reported here
@@ -149,26 +176,35 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 149 tests
+make test          # 156 tests
 make lint
 ```
 
-- `tests/test_perturbation.py` varies the variable name, host names and module
-  across 38 cases and requires convergence in each — the agent is not tuned to
-  one scenario.
+- `tests/test_perturbation.py` — 38 tests, of which **26 require convergence**
+  across varied variable names, host names and modules, so the agent is not
+  tuned to one scenario. The other 12 are the counterweight: 8 pin the inferred
+  defaults and 4 assert the agent *refuses* rather than guessing.
 - `tests/test_real_ansible.py` drives a real `ansible-playbook` process and
-  asserts the end state by running the binary again afterwards.
+  asserts the end state by running the binary again afterwards — for the host
+  and variable classes, that means exit 0 from ansible itself, not from our own
+  bookkeeping.
 - `tests/test_safety.py` asserts the allowlist and PR-mode invariants directly:
   the file is byte-unchanged, the base branch is at the same SHA.
-- The suite runs entirely against scratch repos under `tmp_path`; a guard
-  fixture fails any test that dirties this checkout.
+- Every test that touches a repository runs against a scratch repo under
+  `tmp_path`; the rest are pure-function tests over config and the LLM bridge.
+  A guard fixture fails any test that dirties this checkout, and CI re-checks
+  with `git status --porcelain` afterwards.
 
 ## Roadmap
 
 Honest list of what is **not** here:
 
 - more failure classes (this handles three)
-- `MODULE_REPLACEMENTS` covers `apt_key`, `docker`, `docker_container`
+- `MODULE_REPLACEMENTS` covers `apt_key`, `docker`, `docker_container` — and
+  note that on ansible-core 2.19 `apt_key` still *resolves*, so that mapping is
+  a modernisation rather than a fix for a broken play
+- converging the module class against real Ansible, which needs the replacement
+  collection present
 - OpenTelemetry spans (PRD NFR-5, `SHOULD`, not implemented)
 - a measured autonomous-heal-rate figure across a realistic corpus — the
   perturbation suite is the harness for it, the corpus does not exist yet

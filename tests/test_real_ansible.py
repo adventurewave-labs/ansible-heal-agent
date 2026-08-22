@@ -107,6 +107,34 @@ def test_real_runner_detects_a_host_pattern_that_matches_nothing(real_repo):
     assert result.exit_code == 2, "reported as a failure despite ansible's exit 0"
 
 
+def test_no_hosts_failure_is_reported_once_and_names_the_pattern(real_repo):
+    """Regression: the callback and the text scan both see this event.
+
+    The callback's record used to carry ``host: None`` and no ``pattern``, so
+    it de-duplicated as a *different* failure from the text scan's — every real
+    no-hosts run produced two records, and the callback's could not be
+    diagnosed at all ("failure did not name the host pattern that failed").
+    """
+    result = _run(real_repo, "webservers.yml")
+
+    no_hosts = [f for f in result.failures if f["type"] == "no_hosts_matched"]
+    assert len(no_hosts) == 1, f"expected one record, got {no_hosts}"
+    assert no_hosts[0]["pattern"] == "web-server-01"
+    assert no_hosts[0]["host"] == "web-server-01"
+
+
+def test_no_hosts_failure_from_the_callback_is_diagnosable(real_repo):
+    """The record must be actionable on its own, not just present."""
+    from agent import diagnoser
+    result = _run(real_repo, "webservers.yml")
+    no_hosts = [f for f in result.failures if f["type"] == "no_hosts_matched"][0]
+
+    diag = diagnoser.fallback_diagnose(no_hosts)
+    assert diag["fix"]["action"] == "rename_host", diag
+    assert diag["fix"]["new"] == "web-server-01", diag
+    assert diag["fix"]["old"] == "web-01", diag
+
+
 def test_real_runner_detects_an_undefined_variable_with_its_name(real_repo):
     result = _run(real_repo, "vars.yml")
 
@@ -176,6 +204,65 @@ def test_agent_heals_a_real_ansible_run(real_repo):
         cwd=real_repo, capture_output=True, text=True, check=False)
     assert proc.returncode == 0
     assert "ok=1" in proc.stdout
+
+
+def test_agent_heals_an_undefined_variable_against_real_ansible(real_repo):
+    """Second class, end to end: real exit 2 → patched group_vars → green."""
+    result = heal(playbook="ansible/playbooks/vars.yml", max_retries=3,
+                  use_llm=False)
+
+    assert result.success, f"exit={result.final_exit_code} blocked={result.blocked}"
+    assert "nginx_port" in (real_repo / "ansible" / "group_vars" / "all.yml").read_text()
+
+    proc = subprocess.run(
+        ["ansible-playbook", "-i", "ansible/inventory.yml",
+         "ansible/playbooks/vars.yml"],
+        cwd=real_repo, capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_agent_rewrites_a_removed_module_against_real_ansible(real_repo):
+    """Third class, end to end, to the limit of what the class can honestly promise.
+
+    The swap itself is verified against the real binary: before, ansible-core
+    cannot resolve ``ansible.builtin.docker`` at all; after, that module is gone
+    from the playbook and the name the agent wrote is the one ansible now looks
+    for. It does not reach green, and no wording in this repo should say it
+    does — ``community.docker`` is a Galaxy collection, and installing it is the
+    operator's decision, not the agent's.
+    """
+    before = subprocess.run(
+        ["ansible-playbook", "-i", "ansible/inventory.yml",
+         "ansible/playbooks/module.yml"],
+        cwd=real_repo, capture_output=True, text=True, check=False)
+    assert before.returncode == 4
+    assert "ansible.builtin.docker" in (before.stdout + before.stderr)
+
+    heal(playbook="ansible/playbooks/module.yml", max_retries=2, use_llm=False)
+
+    patched = (real_repo / "ansible" / "playbooks" / "module.yml").read_text()
+    assert "ansible.builtin.docker" not in patched, patched
+    assert "community.docker.docker_container" in patched, patched
+
+    after = subprocess.run(
+        ["ansible-playbook", "-i", "ansible/inventory.yml",
+         "ansible/playbooks/module.yml"],
+        cwd=real_repo, capture_output=True, text=True, check=False)
+    combined = after.stdout + after.stderr
+    assert "ansible.builtin.docker" not in combined, combined
+    assert "community.docker.docker_container" in combined, combined
+
+
+def test_a_module_swap_that_cannot_converge_stops_instead_of_looping(real_repo):
+    """The stall detector is what keeps an unconvergeable class from spinning.
+
+    Re-proposing the same swap for three iterations would burn the retry budget
+    and write three identical commits. One iteration, then stop.
+    """
+    result = heal(playbook="ansible/playbooks/module.yml", max_retries=3,
+                  use_llm=False)
+    assert not result.success
+    assert result.iterations <= 1, f"looped {result.iterations} times on a stuck fix"
 
 
 def test_dry_run_against_real_ansible_writes_nothing(real_repo):

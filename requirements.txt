@@ -13,6 +13,8 @@ ruamel.yaml>=0.18
 # Dev (optional)
 pytest>=8.0
 pytest-cov>=5.0
+# `make lint` runs ruff; CI pins the same tool.
+ruff>=0.6
 
 # Integration tests drive a real ansible-playbook process. Without this the
 # tests in tests/test_real_ansible.py skip rather than fail, but then nothing

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
+from pathlib import Path
+
 from click.testing import CliRunner
 
 from agent.cli import cli
@@ -9,6 +13,16 @@ from agent.cli import cli
 
 def _run(args):
     return CliRunner().invoke(cli, args, catch_exceptions=False)
+
+
+def _git_status(repo: Path) -> str:
+    return subprocess.run(["git", "status", "--porcelain"], cwd=repo,
+                          capture_output=True, text=True).stdout
+
+
+def _scratch_dir_from(output: str) -> str | None:
+    m = re.search(r"^artefacts:\s+(\S+)", output, re.M)
+    return m.group(1) if m else None
 
 
 def test_dry_run_and_approval_are_mutually_exclusive(scratch_repo):
@@ -62,7 +76,43 @@ def test_status_reports_the_target_repo(scratch_repo):
 
 
 def test_transcript_is_written_into_the_target_repo(scratch_repo):
-    _run(["run", "--repo", str(scratch_repo), "--no-llm", "--dry-run"])
+    """Apply mode keeps its artefacts with the repo it healed."""
+    _run(["run", "--repo", str(scratch_repo), "--no-llm"])
     written = list((scratch_repo / "transcripts").glob("run-*.md"))
     assert written, "expected a transcript in the target repo"
+
+
+def test_dry_run_leaves_the_target_repo_untouched(scratch_repo):
+    """The whole promise of dry-run: point it at a repo you do not trust yet.
+
+    Not just "no patches" — no run logs and no transcript either. Those used to
+    land in the target repo, which made ``--dry-run`` a writing operation on a
+    repository the operator had explicitly declined to let it write to.
+    """
+    before = _git_status(scratch_repo)
+    res = _run(["run", "--repo", str(scratch_repo), "--no-llm", "--dry-run"])
+
+    assert _git_status(scratch_repo) == before, (
+        f"--dry-run dirtied the target repo:\n{_git_status(scratch_repo)}")
+    assert not (scratch_repo / "transcripts").exists()
+    assert not (scratch_repo / "pipeline" / "runs").exists()
+
+    # The transcript still exists — outside the repo, at the path we printed.
+    scratch = _scratch_dir_from(res.output)
+    assert scratch is not None, f"dry run did not report its scratch dir:\n{res.output}"
+    written = list((Path(scratch) / "transcripts").glob("run-*.md"))
+    assert written, f"expected a transcript under {scratch}"
     assert "Dry run — nothing was written or committed" in written[0].read_text()
+
+
+def test_blocked_write_names_the_file_once(scratch_repo):
+    """A refused write has to say *which* write was refused, exactly once."""
+    res = _run(["run", "--repo", str(scratch_repo), "--no-llm",
+                "--allowed-paths", "infra/**", "--dry-run", "--no-transcript"])
+    blocked = [ln for ln in res.output.splitlines() if ln.startswith("BLOCKED")]
+    assert blocked, res.output
+    for line in blocked:
+        assert "None" not in line, f"blocked line lost its target file: {line}"
+        assert re.match(r"BLOCKED: refusing to write \S+\.ya?ml: ", line), line
+    # One line per refused write, not one per write plus one per reason.
+    assert len(blocked) == len(set(blocked)) == 3, blocked
