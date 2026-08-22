@@ -50,8 +50,13 @@ class CallbackModule(CallbackBase):
         self.failures: list[dict] = []
         self.ok_hosts: list[str] = []
         self._path = os.environ.get("ANSIBLE_HEAL_SIDECAR")
+        #: Host pattern of the play currently executing. Ansible does not pass
+        #: the play to v2_playbook_on_no_hosts_matched, so it has to be
+        #: remembered here — without it the "no hosts matched" record cannot
+        #: name what failed to match, and the diagnoser has nothing to act on.
+        self._current_pattern: str | None = None
 
-    # ── helpers ──────────────────────────────────────────────────────
+    # ── helpers ──────────────────────────────────────────────
 
     @staticmethod
     def _msg(result) -> str:
@@ -64,6 +69,17 @@ class CallbackModule(CallbackBase):
             return result._task.get_name()
         except Exception:
             return "<unknown task>"
+
+    @staticmethod
+    def _pattern_of(play) -> str | None:
+        """The play's ``hosts:`` pattern, as written in the playbook."""
+        try:
+            hosts = play.hosts
+        except Exception:
+            return None
+        if isinstance(hosts, (list, tuple)):
+            return ",".join(str(h) for h in hosts) or None
+        return str(hosts) or None
 
     @staticmethod
     def _playbook_of(result) -> str:
@@ -87,7 +103,7 @@ class CallbackModule(CallbackBase):
         except OSError:
             pass
 
-    # ── events ───────────────────────────────────────────────────────
+    # ── events ───────────────────────────────────────────────
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
         if ignore_errors:
@@ -121,14 +137,25 @@ class CallbackModule(CallbackBase):
             "message": self._msg(result),
         })
 
+    def v2_playbook_on_play_start(self, play):
+        self._current_pattern = self._pattern_of(play)
+
     def v2_playbook_on_no_hosts_matched(self):
         # Real Ansible treats this as a warning and still exits 0. For an agent
         # watching a deployment pipeline it is the most important signal there
         # is: the play silently did nothing.
+        pattern = self._current_pattern
         self._record({
             "type": "no_hosts_matched",
-            "host": None,
-            "message": "host pattern matched no hosts in inventory; the play was skipped",
+            # Both keys carry the pattern: `pattern` is what the diagnoser reads,
+            # `host` is what failure de-duplication keys on, and the text scan of
+            # the same event fills in both. Leaving either empty produced a
+            # second, undiagnosable copy of every no-hosts failure.
+            "host": pattern,
+            "pattern": pattern,
+            "message": (f"host pattern {pattern!r} matched no hosts in inventory; "
+                        f"the play was skipped" if pattern else
+                        "host pattern matched no hosts in inventory; the play was skipped"),
         })
 
     def v2_runner_on_ok(self, result):
