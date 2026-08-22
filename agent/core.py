@@ -29,11 +29,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agent import committer, diagnoser, patcher, pipeline_restarter
+from agent import committer, config, diagnoser, patcher, pipeline_restarter
 from agent import llm as llm_bridge
 from agent.config import repo_root
 from pipeline import git_helper
@@ -80,6 +82,7 @@ class HealResult:
     push_error: str | None = None
     pr_url: str | None = None
     blocked: list[str] = field(default_factory=list)
+    declined: list[str] = field(default_factory=list)
 
 
 def heal(playbook: str = "ansible/playbooks/site.yml",
@@ -92,13 +95,23 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {MODES}")
 
-    git_helper.init_if_needed()
     history: list[IterationRecord] = []
     result = HealResult(success=False, iterations=0, final_exit_code=-1,
                         history=history, mode=mode)
 
     if mode == MODE_DRY_RUN:
-        return _heal_dry_run(playbook, use_llm, transcript, result)
+        # Deliberately before init_if_needed(): that helper runs `git init`,
+        # `git add .` and a commit when the target is not a repo, which turned
+        # `--dry-run` — the mode for a repository you have not decided to trust
+        # the agent with — into a mode that created one and swept every
+        # unrelated file present into a commit.
+        #
+        # The artefact redirect lives here rather than only in the CLI, so
+        # calling heal(mode="dry-run") as a library gets the same promise.
+        with _dry_run_artefacts():
+            return _heal_dry_run(playbook, use_llm, transcript, result)
+
+    git_helper.init_if_needed()
     if mode == MODE_PR:
         return _heal_pr(playbook, use_llm, transcript, result, remote)
     return _heal_apply(playbook, max_retries, use_llm, transcript, result)
@@ -121,6 +134,16 @@ def _diagnose_and_patch(failure: dict, use_llm: bool, transcript: Transcript | N
         transcript.diagnosis(failure, diag)
 
     fix = diag.get("fix", {})
+    if fix.get("action", "none") == "none":
+        # An honest refusal, not a patch. apply_fix() returns ok=True for this
+        # no-op, which made every caller treat it as a successful fix: PR mode
+        # pushed an empty branch and reported success, the stall detector saw
+        # "progress", and commit_fix's empty return was recorded as a SHA.
+        reason = diag.get("_no_fix_reason") or "no automated fix is available"
+        if transcript:
+            transcript.declined(failure, reason)
+        return None, diag, {"declined_reason": reason}
+
     try:
         patch = patcher.apply_fix(fix, dry_run=dry_run)
         rec.patches.append(patch)
@@ -177,6 +200,25 @@ def _run_once(playbook: str, i: int, transcript: Transcript | None) -> tuple:
     return run, rec
 
 
+@contextmanager
+def _dry_run_artefacts():
+    """Send run logs and transcripts outside the repo, unless already redirected.
+
+    The CLI sets an output root before calling heal() so it can print the path;
+    a library caller does not, and used to get run logs written into the target
+    repo by a mode documented as writing nothing.
+    """
+    if config.output_root_override() is not None:
+        yield
+        return
+    scratch = tempfile.mkdtemp(prefix="ansible-heal-dryrun-")
+    config.set_output_root(scratch)
+    try:
+        yield
+    finally:
+        config.set_output_root(None)
+
+
 def _fix_signature(fix: dict) -> tuple:
     """Identity of a fix, for detecting one the agent has already applied."""
     return (
@@ -217,6 +259,8 @@ def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResul
             fix, diag, patch = _diagnose_and_patch(failure, use_llm, transcript, rec)
             if patch and patch.get("blocked_reason"):
                 result.blocked.append(patch["blocked_reason"])
+            if patch and patch.get("declined_reason"):
+                result.declined.append(patch["declined_reason"])
             if fix is None:
                 continue
             sha = committer.commit_fix(fix, diag)
@@ -271,6 +315,9 @@ def _heal_dry_run(playbook, use_llm, transcript, result) -> HealResult:
         blocked = patch.get("blocked_reason") if patch else None
         if blocked:
             result.blocked.append(blocked)
+        declined = patch.get("declined_reason") if patch else None
+        if declined:
+            result.declined.append(declined)
         result.proposals.append(Proposal(
             failure=failure,
             diagnosis=diag,
@@ -300,6 +347,15 @@ def _heal_pr(playbook, use_llm, transcript, result, remote) -> HealResult:
             transcript.green(0, run)
         return result
 
+    if not git_helper.has_commits():
+        # Branching off an unborn HEAD gives the base branch no commit to
+        # return to, so the checkout back at the end fails and the operator is
+        # left stranded on the heal branch with their base branch gone.
+        result.push_error = (
+            "the target repository has no commits yet; make an initial commit "
+            "before using --require-human-approval")
+        return result
+
     base = git_helper.current_branch()
     branch = f"heal/{time.strftime('%Y%m%d-%H%M%S')}"
     if not git_helper.create_branch(branch):
@@ -313,6 +369,8 @@ def _heal_pr(playbook, use_llm, transcript, result, remote) -> HealResult:
         fix, diag, patch = _diagnose_and_patch(failure, use_llm, transcript, rec)
         if patch and patch.get("blocked_reason"):
             result.blocked.append(patch["blocked_reason"])
+        if patch and patch.get("declined_reason"):
+            result.declined.append(patch["declined_reason"])
         if fix is None:
             continue
         sha = committer.commit_fix(fix, diag)
@@ -459,6 +517,10 @@ class Transcript:
         self._lines.append("")
         self._lines.append("PR mode: the base branch will not be modified and the "
                            "pipeline will not be re-run.")
+        self._lines.append("")
+
+    def declined(self, failure: dict, reason: str) -> None:
+        self._lines.append(f"**No fix proposed** — {reason}")
         self._lines.append("")
 
     def repeated_fix(self, signature: tuple) -> None:

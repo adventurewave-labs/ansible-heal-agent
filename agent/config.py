@@ -83,6 +83,11 @@ def set_output_root(path: str | Path | None) -> Path | None:
     return _OUTPUT_ROOT
 
 
+def output_root_override() -> Path | None:
+    """The explicit artefact root, if one is set. ``None`` means "the repo"."""
+    return _OUTPUT_ROOT
+
+
 def output_root() -> Path:
     """Root for agent-generated artefacts. Defaults to the repo itself."""
     return _OUTPUT_ROOT if _OUTPUT_ROOT is not None else repo_root()

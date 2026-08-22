@@ -55,11 +55,12 @@ def _validate_yaml(path: Path, content: str) -> None:
         raise PatchError(f"patched {path.name} is invalid YAML: {e}") from e
 
 
-def check_allowed(target_rel: str) -> None:
+def check_allowed(target_rel: str | Path, note: str | None = None) -> None:
     """Raise PathNotAllowed if ``target_rel`` is outside the write surface."""
     if not is_path_allowed(target_rel):
+        what = note or str(target_rel)
         raise PathNotAllowed(
-            f"refusing to write {target_rel}: outside the allowed write surface "
+            f"refusing to write {what}: outside the allowed write surface "
             f"{list(allowed_paths())}. Set ANSIBLE_HEAL_ALLOWED_PATHS to widen it."
         )
 
@@ -91,6 +92,20 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
         target = resolve_in_repo(target_rel)
     except ConfigError as e:
         raise PathNotAllowed(str(e)) from e
+
+    # Gate 2b: the allowlist again, on the *resolved* path.
+    #
+    # Gate 1 checks the string the diagnosis asked for. If that path is a
+    # symlink pointing elsewhere inside the repo, the bytes land somewhere the
+    # write surface never permitted — and invisibly, because the committer
+    # stages the declared path, whose own content did not change. Checking only
+    # the declared name made ANSIBLE_HEAL_ALLOWED_PATHS bypassable by a symlink
+    # the agent itself never created.
+    resolved_rel = target.relative_to(repo_root().resolve())
+    if resolved_rel != Path(target_rel):
+        check_allowed(
+            resolved_rel,
+            note=f"{target_rel} resolves to {resolved_rel}")
 
     if not target.exists():
         raise PatchError(f"target_file does not exist: {target_rel}")

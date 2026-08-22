@@ -121,6 +121,22 @@ SITE_PLAYBOOK = """\
 """
 
 
+def baseline_files() -> dict[str, str]:
+    """The canonical broken baseline, as {repo-relative path: content}.
+
+    Exposed so callers can lay the fixture down without ``reset_to_baseline``'s
+    side effects — it calls ``init_if_needed()``, which is exactly what a test
+    for "the agent must not create a git repo here" needs to avoid.
+    """
+    return {
+        "ansible/inventory.yml": INVENTORY_BROKEN,
+        "ansible/group_vars/all.yml": GROUP_VARS_BROKEN,
+        "ansible/playbooks/webservers.yml": WEBSERVERS_BROKEN,
+        "ansible/playbooks/db.yml": DB_PLAYBOOK,
+        "ansible/playbooks/site.yml": SITE_PLAYBOOK,
+    }
+
+
 def reset_to_baseline(commit: bool = False) -> None:
     """Write the canonical broken baseline to the target repo's ``ansible/`` tree.
 
@@ -130,13 +146,7 @@ def reset_to_baseline(commit: bool = False) -> None:
     """
     init_if_needed()
 
-    files = {
-        "ansible/inventory.yml": INVENTORY_BROKEN,
-        "ansible/group_vars/all.yml": GROUP_VARS_BROKEN,
-        "ansible/playbooks/webservers.yml": WEBSERVERS_BROKEN,
-        "ansible/playbooks/db.yml": DB_PLAYBOOK,
-        "ansible/playbooks/site.yml": SITE_PLAYBOOK,
-    }
+    files = baseline_files()
     for rel, content in files.items():
         path = repo_root() / rel
         path.parent.mkdir(parents=True, exist_ok=True)
