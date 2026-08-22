@@ -170,7 +170,7 @@ def test_a_missing_imported_playbook_is_reported_not_raised(repo):
     assert result.failures[0]["type"] == "unreadable_input"
 
 
-# ── variable precedence ────────────────────────────────────────────
+# ── variable precedence ─────────────────────────────────────────────
 
 def test_a_variable_set_on_the_play_is_not_undefined(repo):
     """A play-level `vars:` block satisfies real Ansible.
