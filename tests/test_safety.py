@@ -100,6 +100,57 @@ def test_a_stalled_run_stops_instead_of_burning_its_retry_budget(
     assert result.iterations == 0, "should stop after the first fruitless pass"
 
 
+def test_two_plays_contending_for_one_host_do_not_oscillate(scratch_repo):
+    """Regression: the rename rule assumed exactly one host-targeting play.
+
+    Two plays wanting different names for the same inventory entry made the
+    agent rename it back and forth once per iteration. Every round changed a
+    file, so `progressed` stayed True, the stall detector never fired, and a
+    junk commit landed each time — on the checked-out branch, in the default
+    mode. Renaming a host another play still targets is now refused.
+    """
+    (scratch_repo / "ansible" / "playbooks" / "other.yml").write_text(
+        "- name: Other\n"
+        "  hosts: web-01\n"
+        "  tasks:\n"
+        "    - name: noop\n"
+        "      ansible.builtin.debug:\n"
+        "        msg: other\n")
+    _git(scratch_repo, "add", "-A")
+    _git(scratch_repo, "commit", "-m", "add a play that needs web-01")
+
+    result = heal(max_retries=3, use_llm=False)
+
+    # The other two seeded failures still heal, so one productive iteration is
+    # expected. What must not happen is a second, third and fourth spent
+    # renaming the same entry back and forth.
+    assert not result.success
+    assert result.iterations <= 1, (
+        f"burned {result.iterations} iterations on a fix that cannot converge")
+
+    log = _git(scratch_repo, "log", "--oneline")
+    renames = [ln for ln in log.splitlines() if "rename host" in ln]
+    assert renames == [], f"committed a rename it could not converge on: {renames}"
+
+    inventory = (scratch_repo / "ansible" / "inventory.yml").read_text()
+    assert "web-01:" in inventory, "renamed a host another play still targets"
+
+
+def test_the_refusal_names_the_play_that_still_needs_the_host(scratch_repo):
+    """An operator has to be able to see *why*, not just that it declined."""
+    from agent import diagnoser
+    (scratch_repo / "ansible" / "playbooks" / "other.yml").write_text(
+        "- name: Other\n  hosts: web-01\n  tasks: []\n")
+
+    diag = diagnoser.fallback_diagnose(
+        {"type": "no_hosts_matched", "pattern": "web-server-01",
+         "host": "web-server-01"})
+
+    assert diag["fix"]["action"] == "none"
+    assert "other.yml" in diag["_no_fix_reason"], diag["_no_fix_reason"]
+    assert "web-01" in diag["_no_fix_reason"]
+
+
 # ── dry run ────────────────────────────────────────────────────────
 
 def test_dry_run_writes_nothing_and_commits_nothing(scratch_repo, git_log_count):

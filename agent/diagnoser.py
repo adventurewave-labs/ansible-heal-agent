@@ -20,6 +20,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from agent import llm, yaml_edit
 from agent.config import repo_root
 
@@ -152,13 +154,42 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
 
 # ── deterministic rules ─────────────────────────────────────────────
 
+def _play_host_patterns() -> dict[str, str]:
+    """Every ``hosts:`` pattern in the repo's playbooks, mapped to its file.
+
+    Renaming an inventory entry is only safe if no *other* play depends on the
+    name being renamed away. Without this, two plays targeting different hosts
+    against a one-host inventory make the agent rename that host back and forth
+    once per iteration: it "progresses" every round, so the stall detector never
+    fires, and it lands a junk commit each time.
+    """
+    patterns: dict[str, str] = {}
+    for path in sorted(repo_root().glob(_PLAYBOOK_GLOB)):
+        try:
+            plays = yaml.safe_load(path.read_text()) or []
+        except yaml.YAMLError:
+            continue
+        if not isinstance(plays, list):
+            continue
+        for play in plays:
+            if not isinstance(play, dict):
+                continue
+            hosts = play.get("hosts")
+            if isinstance(hosts, str):
+                patterns.setdefault(hosts, path.name)
+            elif isinstance(hosts, list):
+                for h in hosts:
+                    patterns.setdefault(str(h), path.name)
+    return patterns
+
+
 def _diagnose_host(failure: dict) -> dict[str, Any]:
     """A play targets a host the inventory does not contain.
 
     The fix renames the inventory entry that was *meant* to be that host. Which
     entry that is comes from the inventory itself: the closest existing name to
-    the one the playbook expects. If nothing is close enough, the agent says so
-    rather than renaming an unrelated host.
+    the one the playbook expects. If nothing is close enough — or if renaming it
+    would break a different play — the agent says so rather than guessing.
     """
     expected = failure.get("pattern") or failure.get("host")
     if not expected:
@@ -182,6 +213,13 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
             f"guess, so no fix is proposed")
 
     stale = matches[0]
+    claimed_by = _play_host_patterns().get(stale)
+    if claimed_by:
+        return _no_fix(
+            f"'{stale}' is the closest inventory host to '{expected}', but "
+            f"{claimed_by} still targets '{stale}'; renaming it would break "
+            f"that play, so no fix is proposed")
+
     return {
         "diagnosis": f"Inventory lists '{stale}' but the playbook targets "
                      f"'{expected}'.",
