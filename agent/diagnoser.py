@@ -128,7 +128,7 @@ def _no_fix(reason: str, ftype: str = "other") -> dict[str, Any]:
     }
 
 
-# ── LLM path ───────────────────────────────────────────────────────
+# ── LLM path ─────────────────────────────────────────────────────
 
 def _load_context(failure: dict, root: Path) -> str:
     """Load the files most relevant to this failure."""
@@ -152,7 +152,7 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
     return llm.chat_json(prompt, system=SYSTEM_PROMPT)
 
 
-# ── deterministic rules ─────────────────────────────────────────────
+# ── deterministic rules ────────────────────────────────────────────
 
 def _play_host_patterns() -> dict[str, str]:
     """Every ``hosts:`` pattern in the repo's playbooks, mapped to its file.
@@ -341,9 +341,14 @@ def fallback_diagnose(failure: dict) -> dict[str, Any]:
     """Deterministic diagnoser. Derives the fix from the repo, not a lookup."""
     rule = _RULES.get(failure.get("type"))
     if rule is None:
+        # Carry the failure's own message through. Some types exist precisely to
+        # say something useful — an unreadable file, a host pattern the
+        # simulator cannot evaluate — and swallowing that left the operator with
+        # only a type name to go on.
+        detail = (failure.get("message") or "").strip()
         return _no_fix(
-            f"no rule for failure type {failure.get('type')!r}; "
-            f"no automated fix available")
+            f"no automated fix for {failure.get('type')!r}"
+            + (f": {detail}" if detail else "; no automated fix available"))
     return rule(failure)
 
 
