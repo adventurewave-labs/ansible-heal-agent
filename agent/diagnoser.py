@@ -67,8 +67,12 @@ Rules:
 MODULE_REPLACEMENTS: dict[str, dict[str, Any]] = {
     "apt_key": {
         "module": "ansible.builtin.get_url",
-        "note": "apt_key was removed in ansible-core 2.18; fetch the key into "
-                "/usr/share/keyrings instead.",
+        # Checked against ansible-core 2.19: apt_key still *resolves* — it is
+        # deprecated, not yet removed — so this replacement is a modernisation,
+        # not a fix for an unresolvable module. The mock runner reports it as a
+        # removed module because the seeded scenario predates that check.
+        "note": "apt_key is deprecated and slated for removal; fetch the key "
+                "into /usr/share/keyrings and reference it explicitly instead.",
         "args": lambda old: {
             "url": old.get("url", ""),
             "dest": "/usr/share/keyrings/"
