@@ -70,15 +70,33 @@ def set_repo_root(path: str | Path) -> Path:
     return _OVERRIDE
 
 
+#: Where run logs and transcripts are written. ``None`` means "inside the repo",
+#: which is what apply and pr modes want. Dry-run points this at a scratch
+#: directory outside the repo so that "writes nothing" is literally true.
+_OUTPUT_ROOT: Path | None = None
+
+
+def set_output_root(path: str | Path | None) -> Path | None:
+    """Redirect run logs and transcripts away from the repo, or back into it."""
+    global _OUTPUT_ROOT
+    _OUTPUT_ROOT = None if path is None else Path(path).expanduser().resolve()
+    return _OUTPUT_ROOT
+
+
+def output_root() -> Path:
+    """Root for agent-generated artefacts. Defaults to the repo itself."""
+    return _OUTPUT_ROOT if _OUTPUT_ROOT is not None else repo_root()
+
+
 def runs_dir() -> Path:
     """Directory pipeline run logs are written to (created on demand)."""
-    d = repo_root() / "pipeline" / "runs"
+    d = output_root() / "pipeline" / "runs"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def transcripts_dir() -> Path:
-    d = repo_root() / "transcripts"
+    d = output_root() / "transcripts"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
