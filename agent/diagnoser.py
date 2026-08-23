@@ -240,24 +240,55 @@ def ansible_resolves(pattern: str) -> bool | None:
     exe = shutil.which("ansible")
     if not exe:
         return None
+    if str(pattern).startswith("-"):
+        # Would be read as a flag. Never fail *open* on a parse quirk.
+        return None
+
+    # Third-party inventory plugins and inventory scripts are executable code
+    # supplied by the repository under audit. --dry-run exists to be pointed at
+    # a repository you have not decided to trust, so the probe runs with only
+    # the builtin file-based parsers enabled and no plugin path from the repo.
+    env = {
+        **os.environ,
+        "ANSIBLE_LOCALHOST_WARNING": "False",
+        "ANSIBLE_INVENTORY_UNPARSED_WARNING": "False",
+        "ANSIBLE_INVENTORY_ENABLED": "yaml,ini,toml,host_list",
+        "ANSIBLE_INVENTORY_PLUGINS": str(repo_root() / ".ansible-heal-no-plugins"),
+        "ANSIBLE_RETRY_FILES_ENABLED": "False",
+    }
+
+    # Two probes. The first lets ansible-core resolve its own inventory exactly
+    # as it would for a real run — its ansible.cfg, ANSIBLE_CONFIG,
+    # ANSIBLE_INVENTORY, a comma-separated list, all of it. Handing it `-i <our
+    # guess>` instead, as this used to, overrode the very thing being asked
+    # about: on a repo with two inventory files the probe was shown one of
+    # them, answered "no such host" truthfully, and a live host in the other
+    # file was renamed away.
+    attempts: list[list[str]] = [[exe, str(pattern), "--list-hosts"]]
     inventory = repo_root() / _inventory_rel()
-    if not inventory.is_file():
-        return None
-    try:
-        proc = subprocess.run(
-            [exe, str(pattern), "-i", str(inventory), "--list-hosts"],
-            cwd=str(repo_root()), capture_output=True, text=True, timeout=30,
-            env={**os.environ, "ANSIBLE_LOCALHOST_WARNING": "False",
-                 "ANSIBLE_INVENTORY_UNPARSED_WARNING": "False"},
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    match = re.search(r"hosts \((\d+)\)", proc.stdout)
-    if not match:
-        return None
-    return int(match.group(1)) > 0
+    if inventory.is_file():
+        attempts.append([exe, str(pattern), "-i", str(inventory), "--list-hosts"])
+
+    answered = False
+    for argv in attempts:
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(repo_root()), capture_output=True, text=True,
+                timeout=30, env=env, start_new_session=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            continue
+        match = re.search(r"hosts \((\d+)\)", proc.stdout)
+        if match is None:
+            continue
+        answered = True
+        if int(match.group(1)) > 0:
+            return True
+    # "No definitive answer" must stay None. Collapsing it to False would let a
+    # probe that merely failed to run authorise the rename it exists to block.
+    return False if answered else None
 
 
 def _play_host_patterns() -> dict[str, str]:
@@ -501,6 +532,67 @@ def fallback_diagnose(failure: dict) -> dict[str, Any]:
     return rule(failure)
 
 
+def _guard_inventory_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, Any]:
+    """Apply the host-rename guards to a diagnosis from any source.
+
+    These checks used to live inside ``fallback_diagnose`` only, so a fix that
+    came from the LLM reached the patcher having passed none of them — and the
+    LLM is the default path. The prompt template asks the model, in as many
+    words, to "rename the host in the inventory to the name the playbook
+    targets", which is precisely the destructive act every one of these guards
+    exists to prevent. The patcher's own gates (allowlist, traversal, vault,
+    YAML validity) do not look at Ansible semantics at all.
+    """
+    fix = diagnosis.get("fix") or {}
+    if fix.get("action", "none") == "none":
+        return diagnosis
+
+    target = str(fix.get("target_file") or "")
+    touches_inventory = target == _inventory_rel() or target.endswith("inventory.yml")
+    if not touches_inventory and fix.get("action") != "rename_host":
+        return diagnosis
+
+    as_written = failure.get("raw_pattern") or failure.get("pattern") or failure.get("host")
+    if not as_written:
+        return diagnosis
+
+    reason = _not_a_single_hostname(str(as_written))
+    if reason:
+        return _no_fix(reason, failure.get("type", "other"))
+    if ansible_resolves(str(as_written)) is True:
+        return _no_fix(
+            f"ansible-core resolves {as_written!r} to at least one host, so the "
+            f"inventory is not stale; no rename is proposed",
+            failure.get("type", "other"))
+
+    inventory = _read(_inventory_rel())
+    if inventory is not None:
+        try:
+            groups = yaml_edit.inventory_groups(inventory)
+            hosts = yaml_edit.inventory_hosts(inventory)
+        except Exception:
+            return diagnosis
+        if str(as_written) in groups:
+            return _no_fix(
+                f"'{as_written}' is a group in {_inventory_rel()}, not a host; "
+                f"renaming a host to match it would create a name collision",
+                failure.get("type", "other"))
+        old, new = fix.get("old"), fix.get("new")
+        if new and str(new) in hosts and str(new) != str(old):
+            # Refuse here rather than letting the rename fail inside the
+            # patcher: the operator gets the reason, not a patch error.
+            return _no_fix(
+                f"'{new}' is already a host in {_inventory_rel()}; renaming "
+                f"'{old}' onto it would delete one of them",
+                failure.get("type", "other"))
+        claimed_by = _play_host_patterns().get(str(old)) if old else None
+        if claimed_by:
+            return _no_fix(
+                f"{claimed_by} still targets '{old}'; renaming it would break "
+                f"that play", failure.get("type", "other"))
+    return diagnosis
+
+
 def diagnose(failure: dict, use_llm: bool = True) -> dict[str, Any]:
     """Try the LLM first, fall back to the deterministic rules on any error."""
     if not use_llm:
@@ -509,7 +601,7 @@ def diagnose(failure: dict, use_llm: bool = True) -> dict[str, Any]:
         result = llm_diagnose(failure)
         if "fix" not in result or "target_file" not in result.get("fix", {}):
             raise ValueError("LLM diagnosis missing required keys")
-        return result
+        return _guard_inventory_fix(failure, result)
     except Exception as e:  # noqa: BLE001
         fb = fallback_diagnose(failure)
         fb["_fallback_reason"] = str(e)
