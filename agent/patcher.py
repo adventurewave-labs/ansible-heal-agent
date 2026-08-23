@@ -66,7 +66,7 @@ class VaultRefused(PatchError):
 
 
 def _refuse_if_vault(path: Path, original: str, target_rel: str) -> None:
-    stripped = original.lstrip("\\ufeff \\t\\r\\n")
+    stripped = original.lstrip("﻿ \t\r\n")
     if stripped.startswith(_VAULT_HEADER):
         raise VaultRefused(
             f"refusing to write {target_rel}: it is ansible-vault encrypted. "
@@ -188,12 +188,12 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     # normalise CRLF to LF and drop a BOM, so a one-line change to a
     # Windows-authored file came out as a whole-file rewrite in the diff, and a
     # BOM took the leading `---` with it.
-    bom = raw.startswith(b"\\xef\\xbb\\xbf")
+    bom = raw.startswith(b"\xef\xbb\xbf")
     if bom:
         raw = raw[3:]
     text = raw.decode("utf-8")
-    crlf = "\\r\\n" in text
-    original = text.replace("\\r\\n", "\\n") if crlf else text
+    crlf = "\r\n" in text
+    original = text.replace("\r\n", "\n") if crlf else text
 
     # Gate 2d: never write plaintext over encrypted secrets.
     _refuse_if_vault(target, original, target_rel)
@@ -208,9 +208,9 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     _validate_yaml(target, patched)
 
     if not dry_run:
-        restored = patched.replace("\\n", "\\r\\n") if crlf else patched
+        restored = patched.replace("\n", "\r\n") if crlf else patched
         if bom:
-            restored = "\\ufeff" + restored
+            restored = "﻿" + restored
         try:
             _write_atomically(target, restored)
         except OSError as e:
@@ -228,7 +228,7 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     }
 
 
-# ── actions ─────────────────────────────────────────────────────────
+# ── actions ────────────────────────────────────────────────────────
 
 def _act_edit_file(original: str, fix: dict, target_rel: str) -> str:
     search = fix.get("search")
@@ -291,7 +291,7 @@ def unified_diff(before: str, after: str, path: str = "") -> str:
             tofile=f"b/{path}" if path else "after",
             n=3,
         )
-    ).rstrip("\\n")
+    ).rstrip("\n")
 
 
 def repo_relative(path: Path) -> str:

@@ -498,7 +498,7 @@ def _open_pull_request(branch: str, base: str, rec: IterationRecord) -> str | No
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
 
 
-# ── Transcript writer ────────────────────────────────────────────
+# ── Transcript writer ──────────────────────────────────────────────
 
 class Transcript:
     """Append-only Markdown transcript writer used by the heal loop."""
