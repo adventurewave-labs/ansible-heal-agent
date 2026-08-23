@@ -116,13 +116,39 @@ def _seed(repo: Path, *, variable: str, stale: str, expected: str,
 
 def _assert_healed(repo: Path, variable: str, stale: str, expected: str,
                    module: str) -> None:
+    from agent import diagnoser
+
+    # The module class only converges to a genuinely green pipeline when its
+    # replacement itself resolves. `community.docker.docker_container` needs
+    # the community.docker collection, which this suite does not assume is
+    # installed — the mock now checks every module against ansible-doc, the
+    # same authority the diagnoser does, so it correctly keeps reporting the
+    # replacement broken when the collection is absent. Migrating it is
+    # still correct behaviour, asserted below either way; claiming a false
+    # green over an unresolved replacement is exactly the bug this project's
+    # own README calls worse than a false failure. Checking this
+    # dynamically, rather than assuming it either way, means the suite
+    # still asserts full convergence in an environment where the collection
+    # genuinely is installed.
+    replacement = diagnoser.MODULE_REPLACEMENTS.get(module, {}).get("module")
+    module_converges = (replacement is not None
+                        and diagnoser.module_resolves(replacement) is True)
+
     result = heal(playbook="ansible/playbooks/site.yml", max_retries=3,
                   use_llm=False)
 
-    assert result.success, (
-        f"failed to converge for variable={variable} stale={stale} "
-        f"expected={expected} module={module}: "
-        f"exit={result.final_exit_code} blocked={result.blocked}")
+    if module_converges:
+        assert result.success, (
+            f"failed to converge for variable={variable} stale={stale} "
+            f"expected={expected} module={module}: "
+            f"exit={result.final_exit_code} blocked={result.blocked}")
+    else:
+        assert not result.success, (
+            f"claimed success for variable={variable} stale={stale} "
+            f"expected={expected} module={module} despite an unresolved "
+            f"replacement — a false green")
+        assert any("would change nothing" in d for d in result.declined), \
+            result.declined
 
     inventory = (repo / "ansible" / "inventory.yml").read_text()
     assert f"{expected}:" in inventory
@@ -136,12 +162,15 @@ def _assert_healed(repo: Path, variable: str, stale: str, expected: str,
 
     playbook = (repo / "ansible" / "playbooks" / "webservers.yml").read_text()
     assert f"builtin.{module}:" not in playbook
+    if replacement:
+        assert replacement in playbook, "the module was migrated, whether or not it resolves"
 
-    assert runner.run_pipeline(
-        repo / "ansible" / "playbooks" / "site.yml").exit_code == 0
+    exit_code = runner.run_pipeline(
+        repo / "ansible" / "playbooks" / "site.yml").exit_code
+    assert exit_code == (0 if module_converges else 2)
 
 
-# ── one dimension at a time ──────────────────────────────────────────
+# ── one dimension at a time ─────────────────────────────────────
 
 @pytest.mark.parametrize("variable", VARIABLES)
 def test_heals_any_undefined_variable_name(scratch_repo, variable):
@@ -165,7 +194,7 @@ def test_heals_any_known_removed_module(scratch_repo, module):
     _assert_healed(scratch_repo, "nginx_port", "web-01", "web-server-01", module)
 
 
-# ── all three varied together ────────────────────────────────────────
+# ── all three varied together ───────────────────────────────────
 
 COMBINATIONS = list(itertools.islice(
     zip(itertools.cycle(VARIABLES),
@@ -183,7 +212,7 @@ def test_heals_combined_perturbations(scratch_repo, variable, hosts, module):
     _assert_healed(scratch_repo, variable, stale, expected, module)
 
 
-# ── inferred values ────────────────────────────────────────────────
+# ── inferred values ────────────────────────────────────────
 
 @pytest.mark.parametrize("variable,expected_value", [
     ("nginx_port", 8080),
@@ -201,7 +230,7 @@ def test_inferred_defaults_are_conservative(scratch_repo, variable,
     assert yaml_edit.infer_default(variable) == expected_value
 
 
-# ── honest refusals ────────────────────────────────────────────────
+# ── honest refusals ────────────────────────────────────────
 
 def test_refuses_to_rename_an_unrelated_host(scratch_repo):
     """No close match means no fix — not a coin flip on someone's inventory."""
