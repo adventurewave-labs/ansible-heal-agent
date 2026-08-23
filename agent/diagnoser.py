@@ -142,7 +142,7 @@ def _no_fix(reason: str, ftype: str = "other") -> dict[str, Any]:
     }
 
 
-# ── LLM path ───────────────────────────────────────────────────────
+# ── LLM path ───────────────────────────────────────────────────
 
 def _load_context(failure: dict, root: Path) -> str:
     """Load the files most relevant to this failure."""
@@ -166,7 +166,7 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
     return llm.chat_json(prompt, system=SYSTEM_PROMPT)
 
 
-# ── deterministic rules ─────────────────────────────────────────────
+# ── deterministic rules ──────────────────────────────────────────
 
 #: Characters that make a `hosts:` value a *pattern* rather than a hostname:
 #: separators, exclusion, intersection, ranges, regex and globs.
@@ -229,6 +229,17 @@ _NO_INVENTORY_RE = re.compile(
     r"|skipping inventory source", re.I)
 
 
+#: True when the operator has asked the agent to commit to this repository, so
+#: running that repository's own inventory code is no more than ansible-playbook
+#: would do. False in dry-run.
+_TRUST_REPO = False
+
+
+def set_trust_repo(trust: bool) -> None:
+    global _TRUST_REPO
+    _TRUST_REPO = bool(trust)
+
+
 #: Suffixes the probe's restricted plugin set can actually read.
 _PARSEABLE_SUFFIXES = {".yml", ".yaml", ".ini", ".toml", ""}
 
@@ -261,6 +272,71 @@ def _unparseable_sources_configured() -> bool:
             if os.access(path, os.X_OK):
                 return True
     return False
+
+
+def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
+    """Every host ansible-core sees, or None if it could not be asked.
+
+    ``trust_repo`` decides whether the repository's own inventory plugins and
+    scripts may run. In apply and PR modes the operator has pointed the agent
+    at their own repository and asked it to commit there, so executing that
+    repository's inventory code is no more than `ansible-playbook` would do. In
+    dry-run — the mode for a repository you have not decided to trust — it is
+    not, so the restricted parser set applies and a dynamic source simply makes
+    the answer unavailable.
+
+    This replaces a series of predicates over filenames, suffixes and exec bits
+    that tried to guess which sources were readable and what counted as an
+    inventory. Every one of them was defeated by an ordinary spelling it had
+    not enumerated: a `.yml` plugin config, a second inventory file, a role
+    under playbooks/. Enumerating spellings does not converge; asking
+    ansible-core does.
+    """
+    exe = shutil.which("ansible-inventory")
+    if not exe:
+        return None
+    env = {**os.environ, "ANSIBLE_LOCALHOST_WARNING": "False"}
+    if not trust_repo:
+        env["ANSIBLE_INVENTORY_ENABLED"] = "yaml,ini,toml,host_list"
+        env["ANSIBLE_INVENTORY_PLUGINS"] = str(
+            repo_root() / ".ansible-heal-no-plugins")
+    # Let ansible.cfg win when it names sources; otherwise point ansible at the
+    # convention this agent uses, because ansible's own default is
+    # /etc/ansible/hosts and it would otherwise see nothing at all.
+    argv = [exe, "--list"]
+    try:
+        from pipeline.runner import configured_inventory_sources, inventory_path
+        if not configured_inventory_sources():
+            inv = inventory_path()
+            if inv.is_file():
+                argv.extend(["-i", str(inv)])
+    except Exception:
+        pass
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(repo_root()), capture_output=True,
+            text=True, timeout=60, env=env, start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    if _NO_INVENTORY_RE.search(proc.stdout + proc.stderr):
+        # A source did not parse, so this is a partial view of the hosts. A
+        # partial view is not grounds for deleting one of them.
+        return None
+    try:
+        data = json.loads(proc.stdout[proc.stdout.index("{"):])
+    except (ValueError, json.JSONDecodeError):
+        return None
+    meta = data.get("_meta", {}).get("hostvars", {})
+    hosts = {str(h) for h in meta}
+    for key, value in data.items():
+        if key == "_meta" or not isinstance(value, dict):
+            continue
+        hosts.update(str(h) for h in value.get("hosts", []) or [])
+    hosts.discard("localhost")
+    return hosts or None
 
 
 def ansible_resolves(pattern: str) -> bool | None:
@@ -390,6 +466,19 @@ def module_resolves(module: str) -> bool | None:
     return bool(doc)
 
 
+def _host_vars_file(host: str) -> str | None:
+    """The host_vars file defining variables for ``host``, if there is one.
+
+    A rename that leaves it behind silently detaches every variable the host
+    had — connection details included — and breaks plays that were working.
+    """
+    for suffix in (".yml", ".yaml"):
+        rel = f"ansible/host_vars/{host}{suffix}"
+        if (repo_root() / rel).is_file():
+            return rel
+    return None
+
+
 def _play_host_patterns() -> dict[str, str]:
     """Every ``hosts:`` pattern in the repo's playbooks, mapped to its file.
 
@@ -452,13 +541,23 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
     # host it is about to rename away is defined somewhere it cannot read. It
     # renamed a live host out of a static file that a dynamic source also
     # populated, and reported success.
-    if _unparseable_sources_configured():
+    # The authority on which hosts exist is ansible-core, not this agent's
+    # reading of the inventory file. Asking it covers every source the repo
+    # configures — a second file, a plugin config, a dynamic script — without
+    # the agent having to recognise the shape of any of them.
+    known = inventory_hosts_from_ansible(_TRUST_REPO)
+    if known is None:
         return _no_fix(
-            "this repository's inventory includes a source the agent cannot "
-            "read safely (a dynamic script, a directory, or a plugin), so it "
-            "can see only part of your hosts and will not rename any of them. "
-            "Run with PIPELINE_RUNNER=real for an accurate pipeline result",
-            failure.get("type", "other"))
+            "the agent could not get a complete host list from ansible-core "
+            "for this repository, so it can see only part of your inventory "
+            "and will not rename anything in it. Install ansible-core, or run "
+            "in apply mode if this repository's inventory plugins are yours to "
+            "execute", failure.get("type", "other"))
+    if str(expected) in known:
+        return _no_fix(
+            f"ansible-core already resolves '{expected}' in this inventory, so "
+            f"nothing is stale; the bundled simulator failed to match a source "
+            f"or a pattern it does not implement")
 
     # Ask ansible-core before touching anything. A "failure" the simulator
     # invented is not grounds for editing someone's inventory.
@@ -499,12 +598,18 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
             f"no inventory host resembles '{expected}' (inventory has "
             f"{hosts or 'no hosts'}); renaming an unrelated host would be a "
             f"guess, so no fix is proposed")
-
     stale = matches[0]
     if stale in groups:
         return _no_fix(
             f"the closest inventory name to '{expected}' is the group "
             f"'{stale}'; renaming a group is not a host fix")
+
+    orphaned = _host_vars_file(stale)
+    if orphaned:
+        return _no_fix(
+            f"renaming '{stale}' would orphan {orphaned}, which defines "
+            f"variables for it by name; rename that file too and re-run, or "
+            f"make the change deliberately")
 
     claimed_by = _play_host_patterns().get(stale)
     if claimed_by:
@@ -667,12 +772,24 @@ def _is_inventory_target(target: str) -> bool:
         return False
     normalised = PurePosixPath(target.replace("\\", "/")).as_posix()
     normalised = normalised.removeprefix("./")
+    normalised = PurePosixPath(*[p for p in PurePosixPath(normalised).parts
+                                 if p not in (".", "")]).as_posix()
     if normalised == _inventory_rel():
         return True
-    name = PurePosixPath(normalised).name.lower()
-    parts = {p.lower() for p in PurePosixPath(normalised).parts}
-    return ("inventory" in name or "hosts" in name
-            or "inventory" in parts or "inventories" in parts)
+    # Every source the repo configures counts, not just the first — and a
+    # filename heuristic counted the wrong things in both directions: it missed
+    # a second inventory file, and it refused legitimate fixes to
+    # `playbooks/bastion-hosts.yml` and `inventories/prod/group_vars/all.yml`
+    # on the strength of a substring.
+    try:
+        from pipeline.runner import configured_inventory_sources
+        for source in configured_inventory_sources():
+            src = PurePosixPath(source.replace("\\", "/")).as_posix()
+            if src.removeprefix("./") == normalised:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _guard_inventory_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, Any]:
@@ -712,11 +829,16 @@ def _guard_inventory_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, 
     if not as_written:
         return diagnosis
 
-    if _unparseable_sources_configured():
+    known = inventory_hosts_from_ansible(_TRUST_REPO)
+    if known is None:
         return _no_fix(
-            "this repository's inventory includes a source the agent cannot "
-            "read safely, so it can see only part of your hosts and will not "
-            "rename any of them", failure.get("type", "other"))
+            "the agent could not get a complete host list from ansible-core, "
+            "so it will not rename anything in this inventory",
+            failure.get("type", "other"))
+    if str(as_written) in known:
+        return _no_fix(
+            f"ansible-core already resolves '{as_written}'; nothing is stale",
+            failure.get("type", "other"))
 
     reason = _not_a_single_hostname(str(as_written))
     if reason:

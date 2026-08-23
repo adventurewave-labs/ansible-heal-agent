@@ -104,6 +104,12 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
     result = HealResult(success=False, iterations=0, final_exit_code=-1,
                         history=history, mode=mode)
 
+    # In apply and PR modes the operator has asked the agent to commit to this
+    # repository, so running that repository's own inventory plugins is no more
+    # than ansible-playbook would do. Dry-run is the mode for a repository you
+    # have not decided to trust, so there they stay disabled.
+    diagnoser.set_trust_repo(mode != MODE_DRY_RUN)
+
     if mode == MODE_DRY_RUN:
         # Deliberately before init_if_needed(): that helper runs `git init`,
         # `git add .` and a commit when the target is not a repo, which turned
@@ -119,6 +125,22 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
     git_helper.init_if_needed()
 
     if mode in (MODE_APPLY, MODE_PR):
+        # Every check that stops the agent damaging a working repository —
+        # does this host exist, does this module resolve — is answered by
+        # ansible-core. Without it they all return "unknown", and the modes
+        # that write would run with no authority behind any of their decisions.
+        missing = [b for b in ("ansible", "ansible-inventory", "ansible-doc")
+                   if not shutil.which(b)]
+        if missing:
+            reason = (
+                f"{', '.join(missing)} not found on PATH. The agent verifies "
+                f"every change against ansible-core before committing it, so "
+                f"it will not write without it. Install ansible-core, or use "
+                f"--dry-run to see what it would propose")
+            result.decline(reason)
+            result.push_error = reason
+            return result
+
         blocker = committer.commit_guard()
         if blocker:
             result.decline(blocker)
@@ -168,6 +190,20 @@ def _diagnose_and_patch(failure: dict, use_llm: bool, transcript: Transcript | N
         transcript.diagnosis(failure, diag)
 
     fix = diag.get("fix", {})
+    target = fix.get("target_file")
+    if (target and not dry_run
+            and git_helper.was_dirty(committer.resolved_target(str(target)))):
+        # Refuse before apply_fix(), not after. Checking at commit time left the
+        # operator's work-in-progress already overwritten by the agent's edit,
+        # with the refusal telling them to stash — which would have discarded
+        # both changes together, with nothing separating them.
+        reason = (f"{target} has uncommitted changes; the agent will not edit a "
+                  f"file you are in the middle of. Commit or stash them and "
+                  f"re-run")
+        if transcript:
+            transcript.declined(failure, reason)
+        return None, diag, {"declined_reason": reason}
+
     if fix.get("action", "none") == "none":
         # An honest refusal, not a patch. apply_fix() returns ok=True for this
         # no-op, which made every caller treat it as a successful fix: PR mode
@@ -331,7 +367,6 @@ def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResul
                 transcript.committed(sha, fix)
 
         history.append(rec)
-
         if not progressed:
             # Nothing was patched this round, so re-running would produce the
             # identical failure set. Stop instead of burning the retry budget
@@ -501,7 +536,7 @@ def _open_pull_request(branch: str, base: str, rec: IterationRecord) -> str | No
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
 
 
-# ── Transcript writer ──────────────────────────────────────────────
+# ── Transcript writer ────────────────────────────────────────────
 
 class Transcript:
     """Append-only Markdown transcript writer used by the heal loop."""
