@@ -100,7 +100,7 @@ def repo(scratch_repo: Path) -> Path:
     return scratch_repo
 
 
-# ── secrets ─────────────────────────────────────────────────────────
+# ── secrets ───────────────────────────────────────────
 
 VAULT = ("$ANSIBLE_VAULT;1.1;AES256\n"
          "37623433383166326566396633383864613463396264616238\n"
@@ -152,7 +152,7 @@ def test_a_hardlinked_target_is_refused(repo, tmp_path):
     assert outside.read_text() == "secret: original\n"
 
 
-# ── the operator's git state ────────────────────────────────────────
+# ── the operator's git state ────────────────────────────────
 
 def test_a_merge_in_progress_is_never_concluded_by_the_agent(repo):
     """The agent used to `git add` + `git commit` straight through a conflicted
@@ -212,7 +212,7 @@ def test_a_commit_git_refuses_is_reported_not_counted(repo):
         assert "" not in record.commits, "recorded a phantom empty SHA"
 
 
-# ── host patterns that are not stale hostnames ──────────────────────
+# ── host patterns that are not stale hostnames ────────────────────────
 
 def test_a_group_pattern_never_renames_a_host(repo):
     """An empty group — a tier scaled to zero, a dynamic-inventory placeholder
@@ -482,7 +482,7 @@ def test_a_glob_matches_group_names_too(repo):
     assert sorted(result.succeeded_hosts) == ["alpha", "beta"]
 
 
-# ── the operator's other files ──────────────────────────────────────
+# ── the operator's other files ────────────────────────────────
 
 def test_a_worktree_is_recognised_as_a_repository(repo, tmp_path):
     """In a worktree — and in a submodule — `.git` is a *file*, not a directory.
@@ -537,7 +537,7 @@ def test_initialising_a_directory_does_not_commit_what_was_already_there(
     assert ".env" not in committed, "committed a file it was never asked to touch"
 
 
-# ── inputs that used to raise ───────────────────────────────────────
+# ── inputs that used to raise ─────────────────────────────────
 
 @pytest.mark.parametrize("name,playbook,expect", [
     ("import cycle", "- import_playbook: site.yml\n", "cycle"),
@@ -638,7 +638,7 @@ def test_the_words_vault_in_a_comment_do_not_block_a_patch(repo):
     assert result.success, result.declined
 
 
-# ── the operator's other work in the same repository ────────────────
+# ── the operator's other work in the same repository ──────────────
 
 def test_a_subdirectory_target_does_not_sweep_the_parent_index(tmp_path, monkeypatch):
     """`git commit` with no pathspec commits the WHOLE index.
@@ -705,7 +705,7 @@ def test_a_bare_repository_is_recognised(tmp_path):
     assert (check / "prod.txt").is_file(), "history was masked"
 
 
-# ── patterns, once more ─────────────────────────────────────────────
+# ── patterns, once more ────────────────────────────────────
 
 def test_an_ipv6_literal_with_an_ipv4_tail_is_treated_as_ambiguous(repo):
     """`fd00::21:10.0.0.5` is BOTH a valid IPv6 literal and a union of two
@@ -831,7 +831,7 @@ def test_ansible_core_is_consulted_before_an_inventory_is_edited(repo, monkeypat
     assert "ansible-core resolves" in diag["_no_fix_reason"]
 
 
-# ── the corroboration gate itself ───────────────────────────────────
+# ── the corroboration gate itself ──────────────────────────
 
 def test_the_gate_uses_ansibles_own_inventory_resolution(repo):
     """The gate must ask about the inventory ansible-core would actually use.
@@ -980,7 +980,7 @@ def test_the_gate_does_not_run_repository_supplied_inventory_code(repo):
     assert not marker.exists(), "ran code supplied by the repository under audit"
 
 
-# ── variables Ansible supplies for itself ───────────────────────────
+# ── variables Ansible supplies for itself ───────────────────────
 
 def test_a_role_default_is_not_overwritten_with_a_global(repo):
     """group_vars/all outranks a role default, so writing one there does not
@@ -1073,7 +1073,7 @@ def test_a_top_level_yaml_inventory_resolves(repo):
     assert sorted(result.succeeded_hosts) == ["db-01", "web-01", "web-02"]
 
 
-# ── what the agent cannot see ───────────────────────────────────────
+# ── what the agent cannot see ───────────────────────────────
 
 def test_a_dynamic_inventory_source_stops_every_rename(repo):
     """A repo whose inventory the agent cannot fully see keeps its hosts.
@@ -1113,7 +1113,7 @@ def test_an_unparsed_inventory_is_not_a_missing_host(repo, monkeypatch):
         assert diagnoser.ansible_resolves("db-primary-01") is None
 
 
-# ── variables the agent cannot see ──────────────────────────────────
+# ── variables the agent cannot see ──────────────────────────
 
 def test_a_variable_set_in_the_inventory_is_not_undefined(repo):
     """Inventory `vars:` sit BELOW group_vars/all in Ansible's precedence, so
@@ -1165,7 +1165,7 @@ def test_a_variable_from_vars_files_is_not_undefined(repo):
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
 
 
-# ── fix shapes the guard has to understand ──────────────────────────
+# ── fix shapes the guard has to understand ────────────────────
 
 def test_an_llm_edit_file_on_the_inventory_is_refused(repo, monkeypatch):
     """PROMPT_TEMPLATE asks the model for `edit_file` with search/replace, and
@@ -1214,7 +1214,7 @@ def test_an_inventory_by_another_spelling_is_still_guarded(repo, monkeypatch, sp
     assert diag["fix"]["action"] == "none", (spelling, diag["fix"])
 
 
-# ── the operator's own edits ────────────────────────────────────────
+# ── the operator's own edits ───────────────────────────────
 
 def test_a_second_configured_inventory_is_guarded_too(repo, monkeypatch):
     """An inventory is what ansible.cfg says it is, not what its filename looks
@@ -1267,12 +1267,15 @@ def test_the_operators_uncommitted_work_is_never_committed(repo):
     assert "do not ship" not in log
 
 
-# ── modules that are not actually broken ────────────────────────────
+# ── modules that are not actually broken ──────────────────────
 
 def test_a_module_that_resolves_is_not_migrated(repo):
-    """apt_key resolves on ansible-core 2.19. The simulator declared it removed
-    and the agent rewrote a working playbook autonomously — a key *import*
-    became a file *download*, dropping `id:` and `state:`."""
+    """apt_key resolves on ansible-core 2.19. The mock pipeline used to declare
+    it removed from a hardcoded two-name dict, and the agent rewrote a working
+    playbook autonomously — a key *import* became a file *download*, dropping
+    `id:` and `state:`. The mock now asks ansible-doc for every module a task
+    uses, the same authority the diagnoser does, so it never raises a failure
+    for `apt_key` in the first place — the pipeline goes straight to green."""
     _write(repo, "ansible/playbooks/site.yml", """
         - name: P
           hosts: web-01
@@ -1289,7 +1292,7 @@ def test_a_module_that_resolves_is_not_migrated(repo):
     result = heal(max_retries=3, use_llm=False)
 
     assert (repo / "ansible" / "playbooks" / "site.yml").read_text() == before
-    assert any("resolves" in d for d in result.declined), result.declined
+    assert result.success, result.declined
 
 
 def test_the_module_probe_reads_the_payload_not_the_exit_code(repo):
@@ -1302,7 +1305,110 @@ def test_the_module_probe_reads_the_payload_not_the_exit_code(repo):
     assert diagnoser.module_resolves("totally_made_up_xyz") is False
 
 
-# ── the agent's own preconditions ───────────────────────────────────
+def test_a_tombstoned_module_reads_as_unresolvable_not_unknown(repo):
+    """A module ansible-core tombstoned outright — 'has been removed', naming
+    its replacement — exits 1, unlike an invented name's exit-0 "was not
+    found". Gating on the exit code before the message text treated this
+    more definite case as unanswerable (None) rather than False."""
+    from agent import diagnoser
+    assert diagnoser.module_resolves("bigip_facts") is False
+
+
+def test_an_llm_module_swap_is_refused_as_free_text(repo, monkeypatch):
+    """PROMPT_TEMPLATE asks the model for `edit_file` on a removed-module
+    failure too, and nothing checked that request against ansible-doc — an
+    LLM-proposed rewrite of a task using `apt_key`, which still resolves,
+    reached the patcher exactly as it used to before ansible-doc was
+    consulted at all."""
+    from agent import diagnoser
+
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "removed module", "failure_type": "removed_module",
+        "fix": {"action": "edit_file", "target_file": "ansible/playbooks/site.yml",
+                "search": "ansible.builtin.apt_key:",
+                "replace": "ansible.builtin.get_url:", "rationale": "r"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "removed_module", "module": "apt_key"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", diag["fix"]
+    assert "free text" in diag["_no_fix_reason"]
+
+
+def test_an_llm_replace_module_fix_for_a_module_that_still_resolves_is_refused(
+        repo, monkeypatch):
+    """Defence in depth for the `replace_module` shape itself, not only the
+    `edit_file` shape the prompt template actually asks for: the old module
+    resolving is still checked before a swap is allowed through."""
+    from agent import diagnoser
+
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "removed module", "failure_type": "removed_module",
+        "fix": {"action": "replace_module", "target_file": "ansible/playbooks/site.yml",
+                "old_module": "apt_key", "new_module": "ansible.builtin.get_url",
+                "new_args": {}, "rationale": "r"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "removed_module", "module": "apt_key"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", diag["fix"]
+    assert "resolves" in diag["_no_fix_reason"]
+
+
+def test_the_mock_pipeline_does_not_report_a_false_green_after_an_unresolvable_swap(repo):
+    """The mock's removed-module check used to be a fixed two-name dict: once
+    the agent swapped `docker` for `community.docker.docker_container` — a
+    collection this repo does not install, so the name genuinely still does
+    not resolve — the *next* mock run recognised neither the old nor the new
+    name and reported the pipeline healthy. `Success: True` over a playbook
+    `ansible-playbook` cannot actually run is exactly the false green this
+    project's own README says is worse than a false failure."""
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: sidecar
+              ansible.builtin.docker:
+                image: nginx
+                state: started
+    """)
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert not result.success
+    subjects = _git(repo, "log", "--format=%s")
+    assert "migrate deprecated module" in subjects, subjects
+    patched = (repo / "ansible" / "playbooks" / "site.yml").read_text()
+    assert "community.docker.docker_container" in patched
+    assert "ansible.builtin.docker:" not in patched
+
+
+def test_a_task_using_an_ordinary_keyword_is_never_probed_as_a_module(repo):
+    """Every key in a task dict used to reach the removed-module check.
+    `name`, `when`, `register`, `become` and the rest are not module names,
+    and asking ansible-doc about them would have raised a bogus
+    removed-module failure on almost every ordinary task."""
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: t
+              become: true
+              register: out
+              when: true
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+    assert result.failures == []
+
+
+# ── the agent's own preconditions ─────────────────────────
 
 def test_the_writing_modes_refuse_without_ansible_core(repo, monkeypatch):
     """Every check that stops the agent damaging a working repository — does
@@ -1341,6 +1447,219 @@ def test_a_rename_that_would_orphan_host_vars_is_refused(repo):
 
     assert (repo / "ansible" / "inventory.yml").read_text() == before
     assert any("orphan" in d for d in result.declined), result.declined
+
+
+def test_a_mid_run_edit_is_caught_not_only_a_preexisting_one(repo, monkeypatch):
+    """A one-time snapshot taken when the run starts cannot see an edit made
+    *during* the run — and a run spans at least one pipeline execution plus a
+    diagnose step, which is time enough for an operator to save a file. The
+    check has to be live at the moment the agent is about to write, not
+    against however things looked when the run began."""
+    from agent import diagnoser
+
+    _write(repo, "ansible/playbooks/site.yml", _needs_var())
+    marker = "---\nenv: prod\nsecret_debug: true   # WIP, do not ship\n"
+    real_diagnose = diagnoser.diagnose
+
+    def _dirty_mid_run(failure, use_llm=True):
+        # The file was clean when this run started; the operator's edit
+        # lands here, between the pipeline run that found the failure and
+        # the agent reaching this specific file — the exact window a
+        # run-start-only snapshot cannot see.
+        (repo / "ansible" / "group_vars" / "all.yml").write_text(marker)
+        return real_diagnose(failure, use_llm=use_llm)
+
+    monkeypatch.setattr(diagnoser, "diagnose", _dirty_mid_run)
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == marker
+    assert any("uncommitted changes" in d for d in result.declined), result.declined
+
+
+def test_a_non_ascii_filename_is_still_seen_as_dirty(repo):
+    """git quotes a non-ASCII path in `status --porcelain` output and
+    octal-escapes the non-ASCII bytes. Checking one exact pathspec rather than
+    parsing and decoding the whole tree's status output means there is
+    nothing to get wrong here — but this is the regression test for the
+    version that did parse it, so it stays even though the fix changed how
+    the check works entirely."""
+    _write(repo, "ansible/playbooks/site.yml", _needs_var())
+    target = repo / "ansible" / "group_vars" / "all.yml"
+    non_ascii = repo / "ansible" / "group_vars" / "café.yml"
+    non_ascii.write_text("# untracked, unrelated, just needs a non-ASCII name\n")
+    target.write_text(target.read_text() + "\n# WIP, do not ship\n")
+
+    from pipeline import git_helper
+    assert git_helper.is_dirty(str(target.relative_to(repo)))
+
+    result = heal(max_retries=3, use_llm=False)
+    assert any("uncommitted changes" in d for d in result.declined), result.declined
+
+
+def test_a_host_add_host_creates_at_runtime_is_never_a_rename_target(repo):
+    """`add_host` is an ordinary "provision then target" pattern — a play
+    registers a host that exists only for the rest of that run, and
+    ansible-inventory has no way to see it, by design. When that runtime name
+    is a near-miss for an unrelated, already-defined static host, the
+    closest-match rename mistook the real host for a stale spelling of the
+    runtime one and renamed it away — deleting a real host's identity."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          hosts:
+            dbhost: {}
+            web-01: {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: provision
+          hosts: all
+          gather_facts: false
+          tasks:
+            - name: register the new node
+              ansible.builtin.add_host:
+                name: db_host
+                groups: temp
+        - name: configure
+          hosts: db_host
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    before = (repo / "ansible" / "inventory.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert (repo / "ansible" / "inventory.yml").read_text() == before
+    assert any("add_host" in d for d in result.declined), result.declined
+
+
+def test_an_llm_rename_that_would_orphan_host_vars_is_refused(repo, monkeypatch):
+    """The orphan check lived inside `_diagnose_host` only, so an LLM-proposed
+    `rename_host` — the one action shape `_guard_inventory_fix` accepts —
+    reached the patcher having never been asked whether the host it targets
+    has a host_vars file. Same damage class as the deterministic-path test
+    above, unguarded on the default path."""
+    from agent import diagnoser
+
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          hosts:
+            web-01: {}
+    """)
+    _write(repo, "ansible/host_vars/web-01.yml",
+           "ansible_connection: local\nnginx_port: 9090\n")
+
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "stale host", "failure_type": "unreachable_host",
+        "fix": {"action": "rename_host", "target_file": "ansible/inventory.yml",
+                "old": "web-01", "new": "web-server-01", "rationale": "rename"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "unreachable_host", "pattern": "web-server-01",
+         "host": "web-server-01", "raw_pattern": "web-server-01"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", diag["fix"]
+    assert "orphan" in diag["_no_fix_reason"]
+
+
+def test_a_host_vars_file_beside_a_directory_inventory_is_still_seen(repo):
+    """host_vars/ is discovered relative to wherever the inventory source
+    actually lives, not only under the flat ansible/ convention. A repo whose
+    inventory is a directory (`inventory = ansible/inventories/prod/`) keeps
+    its host_vars there too — real, live vars ansible-inventory genuinely
+    merges in — and the flat-only check never looked, so a rename it called
+    safe orphaned them anyway."""
+    (repo / "ansible.cfg").write_text(
+        "[defaults]\ninventory = ansible/inventories/prod/\n")
+    _write(repo, "ansible/inventories/prod/hosts.yml", """
+        all:
+          hosts:
+            web-01: {}
+    """)
+    _write(repo, "ansible/inventories/prod/host_vars/web-01.yml",
+           "ansible_connection: local\nnginx_port: 9090\n")
+    (repo / "ansible" / "inventory.yml").unlink()
+
+    from agent import diagnoser
+    assert diagnoser._host_vars_file("web-01") == \
+        "ansible/inventories/prod/host_vars/web-01.yml"
+
+
+def test_an_edit_file_inside_a_directory_configured_inventory_is_guarded(repo, monkeypatch):
+    """`inventory = ansible/inventories/` — a directory of host files — is an
+    ordinary layout; ansible-core reads the whole directory as one inventory.
+    Comparing a fix's target against the directory's own path only ever
+    matched the directory itself, so an `edit_file` fix targeting a file
+    *inside* it reached the patcher with none of the guard's checks applied."""
+    from agent import diagnoser
+
+    (repo / "ansible.cfg").write_text(
+        "[defaults]\ninventory = ansible/inventories/\n")
+    _write(repo, "ansible/inventories/prod.yml", "all:\n  hosts:\n    web-01: {}\n")
+    (repo / "ansible" / "inventory.yml").unlink()
+    _commit_fixture(repo)
+
+    assert diagnoser._is_inventory_target("ansible/inventories/prod.yml")
+
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "stale", "failure_type": "unreachable_host",
+        "fix": {"action": "edit_file", "target_file": "ansible/inventories/prod.yml",
+                "search": "web-01:", "replace": "web-server-01:", "rationale": "r"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "unreachable_host", "pattern": "web-server-01",
+         "host": "web-server-01", "raw_pattern": "web-server-01"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", diag["fix"]
+
+
+def test_a_symlinked_inventory_is_recognised_by_its_real_path(repo):
+    """A fix naming the file a symlinked inventory actually points at has to
+    be recognised too — comparing raw strings missed it, since
+    `ansible/inventory.yml` and the file it links to are spelled differently."""
+    from agent import diagnoser
+
+    real = repo / "ansible" / "real_inventory.yml"
+    real.write_text("all:\n  hosts:\n    web-01: {}\n")
+    inv = repo / "ansible" / "inventory.yml"
+    inv.unlink()
+    inv.symlink_to(real)
+    _commit_fixture(repo)
+
+    assert diagnoser._is_inventory_target("ansible/real_inventory.yml")
+
+
+def test_an_absolute_secondary_inventory_source_is_recognised(repo, tmp_path):
+    """ansible.cfg may list an absolute path as one of several inventory
+    sources. The primary source went through a normalising resolve; the rest
+    were compared as raw strings, so an absolute secondary source never
+    matched the repo-relative spelling a fix would actually use."""
+    from agent import diagnoser
+
+    staging = tmp_path / "staging.yml"
+    staging.write_text("all:\n  hosts:\n    stg-01: {}\n")
+    (repo / "ansible.cfg").write_text(
+        f"[defaults]\ninventory = ansible/inventory.yml,{staging}\n")
+    _commit_fixture(repo)
+
+    assert diagnoser._is_inventory_target(str(staging))
+
+
+def test_a_tilde_inventory_path_in_ansible_cfg_is_expanded(repo, monkeypatch):
+    """ansible-core expands `~` in an inventory path; the mock runner did not,
+    so a repo whose ansible.cfg used the ordinary `~/...` convention was
+    reported broken here while `ansible-playbook` ran it clean."""
+    monkeypatch.setenv("HOME", str(repo))
+    (repo / "ansible.cfg").write_text(
+        "[defaults]\ninventory = ~/ansible/inventory.yml\n")
+    _commit_fixture(repo)
+
+    from pipeline import runner
+    assert runner.inventory_path() == (repo / "ansible" / "inventory.yml").resolve()
 
 
 def test_a_file_the_operator_is_editing_is_not_written_to(repo):
