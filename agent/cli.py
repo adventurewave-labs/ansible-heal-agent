@@ -12,7 +12,10 @@ from agent.core import MODE_APPLY, MODE_DRY_RUN, MODE_PR, Transcript, heal
 
 def _apply_common(repo: str | None, allowed_paths: str | None) -> None:
     if repo:
-        config.set_repo_root(repo)
+        try:
+            config.set_repo_root(repo)
+        except config.ConfigError as e:
+            raise click.UsageError(str(e)) from e
     if allowed_paths is not None:
         import os
         os.environ["ANSIBLE_HEAL_ALLOWED_PATHS"] = allowed_paths

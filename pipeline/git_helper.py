@@ -47,6 +47,11 @@ def is_repo() -> bool:
     silently stage nothing. Such a directory gets its own repository; an
     ordinary subdirectory keeps using the enclosing one.
     """
+    if _git("rev-parse", "--is-bare-repository").stdout.strip() == "true":
+        # A bare repo has no work tree, so the check below says "not a
+        # repository" and the agent would `git init` a shadow .git inside it,
+        # masking every ref in the real one from anything that clones the path.
+        return True
     proc = _git("rev-parse", "--is-inside-work-tree")
     if proc.returncode != 0 or proc.stdout.strip() != "true":
         return False
@@ -143,7 +148,8 @@ def add(path: str | Path) -> None:
     _git("add", str(path))
 
 
-def commit(message: str, allow_empty: bool = False) -> str:
+def commit(message: str, allow_empty: bool = False,
+           pathspec: str | None = None) -> str:
     """Create a commit and return its SHA.
 
     Raises GitStateError rather than returning "" when git refuses. The empty
@@ -155,12 +161,24 @@ def commit(message: str, allow_empty: bool = False) -> str:
     args = ["commit", "-m", message]
     if allow_empty:
         args.append("--allow-empty")
+    if pathspec:
+        # Commit ONLY this path. A bare `git commit` commits the whole index,
+        # so pointing the agent at a subdirectory of a repository swept the
+        # operator's own staged work into a commit titled as an Ansible fix.
+        args.extend(["--", pathspec])
     proc = _git(*args)
     if proc.returncode != 0:
-        detail = (proc.stderr.strip() or proc.stdout.strip() or
-                  "git refused the commit").splitlines()
+        # git puts the actual reason last ("nothing added to commit"), after
+        # branch and status preamble. Taking the first line reported
+        # "On branch master", which tells the operator nothing.
+        lines = [ln.strip() for ln in
+                 (proc.stderr + "\n" + proc.stdout).splitlines() if ln.strip()]
+        noise = ("on branch", "your branch", "untracked files",
+                 "changes not staged", "no changes added")
+        useful = [ln for ln in lines
+                  if not any(ln.lower().startswith(n) for n in noise)]
         raise GitStateError(
-            f"could not commit: {detail[0] if detail else 'unknown reason'}")
+            f"could not commit: {useful[-1] if useful else 'git refused the commit'}")
     sha = _git("rev-parse", "HEAD").stdout.strip()
     if not sha:
         raise GitStateError("commit reported success but HEAD did not move")
