@@ -218,3 +218,4 @@ ae9d0df 2026-08-23 fix(vars): add missing variable to group_vars
 5aee2db 2026-08-23 fix(playbook): migrate deprecated module to modern equivalent
 b122475 2026-08-23 chore: reset to broken baseline
 ```
+
