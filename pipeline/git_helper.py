@@ -149,19 +149,34 @@ _PREEXISTING_DIRTY: set[str] = set()
 
 
 def snapshot_dirty() -> None:
-    """Record the working tree's modified paths before the agent edits anything."""
+    """Record the working tree's modified paths before the agent edits anything.
+
+    Stored as absolute paths. `git status --porcelain` prints them relative to
+    the *git top level*, which is not the agent's repo root when the target is
+    a subdirectory — so comparing the two strings never matched, and the guard
+    silently never fired for exactly the layout it was written for. Quoted
+    paths (a filename with a space) missed for the same reason.
+    """
     global _PREEXISTING_DIRTY
-    proc = _git("status", "--porcelain")
+    top = _git("rev-parse", "--show-toplevel").stdout.strip()
+    base = Path(top) if top else repo_root()
     paths: set[str] = set()
-    for line in proc.stdout.splitlines():
-        if len(line) > 3:
-            paths.add(line[3:].strip().split(" -> ")[-1])
+    for line in _git("status", "--porcelain").stdout.splitlines():
+        if len(line) <= 3:
+            continue
+        entry = line[3:].strip().split(" -> ")[-1].strip()
+        if entry.startswith('"') and entry.endswith('"'):
+            try:
+                entry = entry[1:-1].encode().decode("unicode_escape")
+            except UnicodeDecodeError:
+                entry = entry[1:-1]
+        paths.add(str((base / entry).resolve()))
     _PREEXISTING_DIRTY = paths
 
 
 def was_dirty(path: str | Path) -> bool:
     """True if ``path`` already had uncommitted changes when the run started."""
-    return str(path) in _PREEXISTING_DIRTY
+    return str((repo_root() / path).resolve()) in _PREEXISTING_DIRTY
 
 
 def add(path: str | Path) -> None:

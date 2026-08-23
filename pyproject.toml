@@ -15,6 +15,12 @@ dependencies = [
     # agent.yaml_edit does round-trip edits; without this the patcher
     # cannot preserve comments, key order or indentation.
     "ruamel.yaml>=0.18",
+    # A hard runtime dependency, not a test one. Every check that stops the
+    # agent damaging a working repository — does this host exist, does this
+    # module resolve — is answered by ansible-core, and without it they all
+    # return "unknown". `pip install ansible-heal-agent` used to produce an
+    # install whose safety guards were all inert.
+    "ansible-core>=2.16",
 ]
 
 [project.optional-dependencies]
@@ -22,7 +28,6 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.6",
-    "ansible-core>=2.16",
 ]
 
 [project.scripts]

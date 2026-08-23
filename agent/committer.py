@@ -40,6 +40,11 @@ def note_preexisting_changes() -> None:
     git_helper.snapshot_dirty()
 
 
+def resolved_target(target: str) -> str:
+    """Public alias — core checks the same path the committer will stage."""
+    return _resolved_target(target)
+
+
 def _resolved_target(target: str) -> str:
     """``target``, or what it points at when it is a symlink inside the repo."""
     from agent.config import repo_root

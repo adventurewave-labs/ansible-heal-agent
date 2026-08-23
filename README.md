@@ -73,11 +73,27 @@ ansible-heal run --repo ~/infra
 
 These are implemented and tested, not planned.
 
-**The agent refuses when it cannot see the whole picture.** If the repo points
-Ansible at an inventory source the agent will not read — a dynamic script, a
-directory of sources, an inventory plugin — it declines every rename, because
-the host it would delete may be defined somewhere it cannot see. It will not
-execute code the target repo supplies in order to find out.
+**ansible-core is the authority, and it is required.** `apply` and
+`--require-human-approval` refuse to run without `ansible`, `ansible-inventory`
+and `ansible-doc` on PATH. Every check that stops the agent damaging a working
+repository — does this host exist, does this module resolve — is answered by
+ansible-core, and without it they all return "unknown". It is a hard runtime
+dependency for that reason, not a test one.
+
+The host set comes from `ansible-inventory --list`, so it covers every source
+the repo configures: a second inventory file, a plugin config, a dynamic
+script. Nine rounds of audit taught this the expensive way — the agent used to
+decide which files were inventories and which sources it could read by
+inspecting filenames, suffixes and exec bits, and *every* such predicate was
+defeated by an ordinary spelling it had not enumerated. Enumerating spellings
+does not converge. Asking ansible-core does.
+
+In `apply` and PR modes the repository's own inventory plugins run, because the
+operator has pointed the agent at their repository and asked it to commit
+there — that is no more than `ansible-playbook` would do. In `--dry-run`, the
+mode for a repository you have not decided to trust, they stay disabled, and a
+dynamic source simply makes the answer unavailable — which refuses the rename
+rather than authorising it.
 
 The same principle covers the rest: a module is migrated only if `ansible-doc`
 says ansible-core cannot resolve it (`apt_key` still resolves, so rewriting a
@@ -326,7 +342,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 240 tests
+make test          # 245 tests
 make lint
 ```
 
