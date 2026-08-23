@@ -18,7 +18,7 @@ def _site(repo: Path) -> Path:
     return repo / "ansible" / "playbooks" / "site.yml"
 
 
-# ── mock runner ───────────────────────────────────────────
+# ── mock runner ───────────────────────────────────────────────────────
 
 def test_baseline_fails_with_three_failures(scratch_repo):
     result = runner.run_pipeline(_site(scratch_repo))
@@ -64,7 +64,7 @@ def test_runner_goes_green_once_baseline_is_fixed(scratch_repo):
     assert result.failures == []
 
 
-# ── diagnoser ───────────────────────────────────────────
+# ── diagnoser ───────────────────────────────────────────────────────
 
 def test_fallback_diagnoser_hostname_change(scratch_repo):
     diag = diagnoser.fallback_diagnose(
@@ -114,7 +114,7 @@ def test_unknown_failure_type_yields_no_op_fix(scratch_repo):
     assert diag["fix"]["action"] == "none"
 
 
-# ── patcher ───────────────────────────────────────────
+# ── patcher ────────────────────────────────────────────────────────
 
 def test_patcher_applies_hostname_rename(scratch_repo):
     diag = diagnoser.fallback_diagnose(
@@ -156,7 +156,7 @@ def test_patcher_rejects_invalid_yaml_and_does_not_write(scratch_repo):
     assert inv.read_text() == before
 
 
-# ── heal loop ───────────────────────────────────────────
+# ── heal loop ──────────────────────────────────────────────────────
 
 def test_full_heal_loop_with_fallback(scratch_repo, git_log_count):
     """The seeded baseline has three failure classes. The host rename and the
