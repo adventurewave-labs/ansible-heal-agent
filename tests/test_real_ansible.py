@@ -129,7 +129,7 @@ def _run(repo: Path, playbook: str):
     return runner.run_pipeline(repo / "ansible" / "playbooks" / playbook)
 
 
-# ── detection ─────────────────────────────────────────────────────────
+# ── detection ───────────────────────────────────────────────────────
 
 def test_real_runner_detects_a_host_pattern_that_matches_nothing(real_repo):
     """The case the old regexes could never catch: real ansible exits 0."""
@@ -234,7 +234,7 @@ def test_real_runner_writes_a_log_and_a_sidecar(real_repo):
     assert log.with_suffix(".json").exists()
 
 
-# ── healing ───────────────────────────────────────────────────────
+# ── healing ────────────────────────────────────────────────────────
 
 def test_agent_heals_a_real_ansible_run(real_repo):
     """End to end: real ansible-playbook fails, the agent patches, it goes green."""
@@ -338,7 +338,7 @@ def test_dry_run_against_real_ansible_writes_nothing(real_repo):
     assert (real_repo / "ansible" / "inventory.yml").read_text() == before
 
 
-# ── configuration errors ───────────────────────────────────────────────
+# ── configuration errors ─────────────────────────────────────────────
 
 def test_requesting_the_real_runner_without_ansible_is_an_error(
         scratch_repo, monkeypatch):

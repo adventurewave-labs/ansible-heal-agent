@@ -141,7 +141,7 @@ def _assert_healed(repo: Path, variable: str, stale: str, expected: str,
         repo / "ansible" / "playbooks" / "site.yml").exit_code == 0
 
 
-# ── one dimension at a time ────────────────────────────────────────────
+# ── one dimension at a time ──────────────────────────────────────────
 
 @pytest.mark.parametrize("variable", VARIABLES)
 def test_heals_any_undefined_variable_name(scratch_repo, variable):
@@ -165,7 +165,7 @@ def test_heals_any_known_removed_module(scratch_repo, module):
     _assert_healed(scratch_repo, "nginx_port", "web-01", "web-server-01", module)
 
 
-# ── all three varied together ─────────────────────────────────────────
+# ── all three varied together ────────────────────────────────────────
 
 COMBINATIONS = list(itertools.islice(
     zip(itertools.cycle(VARIABLES),

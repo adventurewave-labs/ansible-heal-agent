@@ -174,7 +174,7 @@ def test_a_pattern_the_simulator_cannot_parse_is_reported_as_such(repo):
     assert (repo / "ansible" / "inventory.yml").read_text() == before
 
 
-# ── inputs that are absent or malformed ────────────────────────────
+# ── inputs that are absent or malformed ─────────────────────────────
 
 def test_absent_group_vars_is_tolerated_not_fatal(repo):
     """group_vars is optional in Ansible. The runner hard-coded all.yml and
@@ -216,7 +216,7 @@ def test_a_missing_imported_playbook_is_reported_not_raised(repo):
     assert result.failures[0]["type"] == "unreadable_input"
 
 
-# ── variable precedence ───────────────────────────────────────────
+# ── variable precedence ─────────────────────────────────────────────
 
 def test_a_variable_set_on_the_play_is_not_undefined(repo):
     """A play-level `vars:` block satisfies real Ansible.
@@ -244,7 +244,7 @@ def test_a_variable_set_on_the_play_is_not_undefined(repo):
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
 
 
-# ── file shapes and encodings ────────────────────────────────────
+# ── file shapes and encodings ───────────────────────────────────────
 
 def test_a_fifo_is_refused_rather_than_blocking_forever(repo):
     """Opening a FIFO blocks until a writer appears, which in practice is

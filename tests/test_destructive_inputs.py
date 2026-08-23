@@ -100,7 +100,7 @@ def repo(scratch_repo: Path) -> Path:
     return scratch_repo
 
 
-# ── secrets ───────────────────────────────────────────────────────
+# ── secrets ─────────────────────────────────────────────────────────
 
 VAULT = ("$ANSIBLE_VAULT;1.1;AES256\n"
          "37623433383166326566396633383864613463396264616238\n"
@@ -152,7 +152,7 @@ def test_a_hardlinked_target_is_refused(repo, tmp_path):
     assert outside.read_text() == "secret: original\n"
 
 
-# ── the operator's git state ─────────────────────────────────────────
+# ── the operator's git state ────────────────────────────────────────
 
 def test_a_merge_in_progress_is_never_concluded_by_the_agent(repo):
     """The agent used to `git add` + `git commit` straight through a conflicted
@@ -482,7 +482,7 @@ def test_a_glob_matches_group_names_too(repo):
     assert sorted(result.succeeded_hosts) == ["alpha", "beta"]
 
 
-# ── the operator's other files ─────────────────────────────────────
+# ── the operator's other files ──────────────────────────────────────
 
 def test_a_worktree_is_recognised_as_a_repository(repo, tmp_path):
     """In a worktree — and in a submodule — `.git` is a *file*, not a directory.
@@ -537,7 +537,7 @@ def test_initialising_a_directory_does_not_commit_what_was_already_there(
     assert ".env" not in committed, "committed a file it was never asked to touch"
 
 
-# ── inputs that used to raise ──────────────────────────────────────
+# ── inputs that used to raise ───────────────────────────────────────
 
 @pytest.mark.parametrize("name,playbook,expect", [
     ("import cycle", "- import_playbook: site.yml\n", "cycle"),
@@ -705,7 +705,7 @@ def test_a_bare_repository_is_recognised(tmp_path):
     assert (check / "prod.txt").is_file(), "history was masked"
 
 
-# ── patterns, once more ──────────────────────────────────────────
+# ── patterns, once more ─────────────────────────────────────────────
 
 def test_an_ipv6_literal_with_an_ipv4_tail_is_treated_as_ambiguous(repo):
     """`fd00::21:10.0.0.5` is BOTH a valid IPv6 literal and a union of two
@@ -831,7 +831,7 @@ def test_ansible_core_is_consulted_before_an_inventory_is_edited(repo, monkeypat
     assert "ansible-core resolves" in diag["_no_fix_reason"]
 
 
-# ── the corroboration gate itself ─────────────────────────────────
+# ── the corroboration gate itself ───────────────────────────────────
 
 def test_the_gate_uses_ansibles_own_inventory_resolution(repo):
     """The gate must ask about the inventory ansible-core would actually use.
@@ -1072,7 +1072,7 @@ def test_a_top_level_yaml_inventory_resolves(repo):
     assert sorted(result.succeeded_hosts) == ["db-01", "web-01", "web-02"]
 
 
-# ── what the agent cannot see ─────────────────────────────────────
+# ── what the agent cannot see ───────────────────────────────────────
 
 def test_a_dynamic_inventory_source_stops_every_rename(repo):
     """The probe deliberately runs without the script, auto and constructed
@@ -1109,7 +1109,7 @@ def test_an_unparsed_inventory_is_not_a_missing_host(repo, monkeypatch):
         assert diagnoser.ansible_resolves("db-primary-01") is None
 
 
-# ── variables the agent cannot see ───────────────────────────────
+# ── variables the agent cannot see ──────────────────────────────────
 
 def test_a_variable_set_in_the_inventory_is_not_undefined(repo):
     """Inventory `vars:` sit BELOW group_vars/all in Ansible's precedence, so
@@ -1212,7 +1212,7 @@ def test_an_inventory_by_another_spelling_is_still_guarded(repo, monkeypatch, sp
     assert diag["fix"]["action"] == "none", (spelling, diag["fix"])
 
 
-# ── the operator's own edits ───────────────────────────────────────
+# ── the operator's own edits ────────────────────────────────────────
 
 def test_the_operators_uncommitted_work_is_never_committed(repo):
     """`git commit -- <path>` commits the WORKING TREE state of that path. The
