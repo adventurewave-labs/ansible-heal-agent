@@ -21,14 +21,14 @@ $ ruff check .
 All checks passed!
 
 $ python3 -m pytest -q
-194 passed
+208 passed
 
 $ python3 -m pytest -q --cov=agent --cov=pipeline
-TOTAL  1843  303  682  126  81%
+TOTAL  1959  319  742  135  81%
 ```
 
 That is the command CI runs, and the one its `--cov-fail-under=78` gate applies
-to. Adding `--cov=scenarios` gives `TOTAL 1880 318 696 129 80%` — the previous
+to. Adding `--cov=scenarios` gives `TOTAL 1996 334 756 138 81%` — the previous
 version of this file printed the two-package totals under the three-package
 command, which is exactly the kind of thing this document exists to catch.
 
@@ -37,15 +37,15 @@ command, which is exactly the kind of thing this document exists to catch.
 | `agent/config.py` | 98% |
 | `agent/llm.py` | 97% |
 | `agent/pipeline_restarter.py` | 90% |
-| `pipeline/runner.py` | 90% |
-| `agent/committer.py` | 90% |
+| `pipeline/runner.py` | 88% |
+| `agent/committer.py` | 86% |
 | `agent/yaml_edit.py` | 81% |
 | `agent/cli.py` | 81% |
 | `agent/log_scanner.py` | 81% |
-| `agent/patcher.py` | 83% |
+| `agent/patcher.py` | 84% |
 | `agent/core.py` | 69% |
 | `agent/diagnoser.py` | 67% |
-| `pipeline/git_helper.py` | 76% |
+| `pipeline/git_helper.py` | 81% |
 
 The three lowest are named deliberately rather than omitted: `core.py`'s
 uncovered lines are mostly `Transcript` formatting, `git_helper.py` is the
@@ -81,12 +81,15 @@ The program output itself is real and unedited.
 
 The single most important result, because the previous implementation could not
 do it. `tests/test_destructive_inputs.py` is the most important file in the suite:
-thirteen repositories the agent must not damage. Every one is a case where an
+twenty-seven repositories the agent must not damage. Every one is a case where an
 earlier version made a confident, committed change that destroyed something —
 a vault-encrypted secrets file rewritten as plaintext, a production host
 renamed out of the inventory to match a group name, an operator's half-finished
 merge concluded under a commit subject about something else. The required
-behaviour in all thirteen is identical: refuse, say why, change nothing.
+behaviour in nearly all of them is identical: refuse, say why, change nothing.
+The exceptions are the ones that must still *heal* — a stale IPv6 address, a
+`?` glob — where the point is that a guard added to stop the damage did not
+also stop the fix.
 
 `tests/test_runner_inputs.py` is the counterpart to this section: sixteen cases for
 repositories that are *not* the seeded baseline — comma-separated and
@@ -168,6 +171,13 @@ Asserted as properties, not by inspection:
   on a detached HEAD, and reports a commit git refuses rather than counting it
 - apply and PR modes hold an exclusive lock on the target repo: 6/6 paired
   concurrent runs left nothing staged, against 9/12 that stranded work before
+- a worktree and a submodule are recognised as repositories — `.git` is a file
+  there, and reading that as "not a repository" made the agent `git init` on
+  top of a real one
+- initialising a directory that is not a repository does not commit what was
+  already in it
+- host patterns are checked as the operator wrote them, not as a runner split
+  them: an IPv6 literal is one host, and `?` is a glob
 - the test suite leaves `git status --porcelain` empty — enforced in CI
 
 ## Known gaps
