@@ -640,7 +640,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     log_lines.append("PHASE B: Runtime execution")
     log_lines.append("")
 
-    # ── Phase B: runtime execution ─────────────────────────────────────
+    # ── Phase B: runtime execution ────────────────────────────────────────
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
