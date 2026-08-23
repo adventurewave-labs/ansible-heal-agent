@@ -482,7 +482,7 @@ def test_a_glob_matches_group_names_too(repo):
     assert sorted(result.succeeded_hosts) == ["alpha", "beta"]
 
 
-# ── the operator's other files ────────────────────────────────────────
+# ── the operator's other files ───────────────────────────────────
 
 def test_a_worktree_is_recognised_as_a_repository(repo, tmp_path):
     """In a worktree — and in a submodule — `.git` is a *file*, not a directory.
@@ -537,7 +537,7 @@ def test_initialising_a_directory_does_not_commit_what_was_already_there(
     assert ".env" not in committed, "committed a file it was never asked to touch"
 
 
-# ── inputs that used to raise ────────────────────────────────────────
+# ── inputs that used to raise ────────────────────────────────────
 
 @pytest.mark.parametrize("name,playbook,expect", [
     ("import cycle", "- import_playbook: site.yml\n", "cycle"),
@@ -705,7 +705,7 @@ def test_a_bare_repository_is_recognised(tmp_path):
     assert (check / "prod.txt").is_file(), "history was masked"
 
 
-# ── patterns, once more ────────────────────────────────────────────────
+# ── patterns, once more ────────────────────────────────────────
 
 def test_an_ipv6_literal_with_an_ipv4_tail_is_treated_as_ambiguous(repo):
     """`fd00::21:10.0.0.5` is BOTH a valid IPv6 literal and a union of two
@@ -831,7 +831,7 @@ def test_ansible_core_is_consulted_before_an_inventory_is_edited(repo, monkeypat
     assert "ansible-core resolves" in diag["_no_fix_reason"]
 
 
-# ── the corroboration gate itself ────────────────────────────────────
+# ── the corroboration gate itself ─────────────────────────────
 
 def test_the_gate_uses_ansibles_own_inventory_resolution(repo):
     """The gate must ask about the inventory ansible-core would actually use.
@@ -980,7 +980,7 @@ def test_the_gate_does_not_run_repository_supplied_inventory_code(repo):
     assert not marker.exists(), "ran code supplied by the repository under audit"
 
 
-# ── variables Ansible supplies for itself ────────────────────────────
+# ── variables Ansible supplies for itself ──────────────────────
 
 def test_a_role_default_is_not_overwritten_with_a_global(repo):
     """group_vars/all outranks a role default, so writing one there does not
@@ -1073,7 +1073,7 @@ def test_a_top_level_yaml_inventory_resolves(repo):
     assert sorted(result.succeeded_hosts) == ["db-01", "web-01", "web-02"]
 
 
-# ── what the agent cannot see ─────────────────────────────────────────
+# ── what the agent cannot see ───────────────────────────────────
 
 def test_a_dynamic_inventory_source_stops_every_rename(repo):
     """A repo whose inventory the agent cannot fully see keeps its hosts.
@@ -1165,7 +1165,7 @@ def test_a_variable_from_vars_files_is_not_undefined(repo):
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
 
 
-# ── fix shapes the guard has to understand ───────────────────────────
+# ── fix shapes the guard has to understand ─────────────────────
 
 def test_an_llm_edit_file_on_the_inventory_is_refused(repo, monkeypatch):
     """PROMPT_TEMPLATE asks the model for `edit_file` with search/replace, and
@@ -1214,7 +1214,7 @@ def test_an_inventory_by_another_spelling_is_still_guarded(repo, monkeypatch, sp
     assert diag["fix"]["action"] == "none", (spelling, diag["fix"])
 
 
-# ── the operator's own edits ─────────────────────────────────────────
+# ── the operator's own edits ────────────────────────────────────
 
 def test_a_second_configured_inventory_is_guarded_too(repo, monkeypatch):
     """An inventory is what ansible.cfg says it is, not what its filename looks
@@ -1267,7 +1267,7 @@ def test_the_operators_uncommitted_work_is_never_committed(repo):
     assert "do not ship" not in log
 
 
-# ── modules that are not actually broken ──────────────────────────────
+# ── modules that are not actually broken ────────────────────────
 
 def test_a_module_that_resolves_is_not_migrated(repo):
     """apt_key resolves on ansible-core 2.19. The mock pipeline used to declare
@@ -1408,7 +1408,7 @@ def test_a_task_using_an_ordinary_keyword_is_never_probed_as_a_module(repo):
     assert result.failures == []
 
 
-# ── the agent's own preconditions ────────────────────────────────────
+# ── the agent's own preconditions ────────────────────────────────
 
 def test_the_writing_modes_refuse_without_ansible_core(repo, monkeypatch):
     """Every check that stops the agent damaging a working repository — does
