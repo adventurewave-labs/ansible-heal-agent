@@ -57,19 +57,21 @@ WEBSERVERS_BROKEN = """\
 # Webservers playbook
 # Fails on three deliberately seeded issues:
 #   1. Targets host `web-server-01` which does NOT exist in inventory.yml
-#   2. Uses the deprecated `apt_key` module. The mock runner treats it as
-#      unresolvable; real ansible-core 2.19 still resolves it, so against the
-#      real binary this class is exercised with `docker` instead.
+#   2. Uses the `docker` module, which ansible-core genuinely does not resolve
+#      (it moved to the community.docker collection). Verified with ansible-doc
+#      rather than assumed: the agent refuses to migrate a module that still
+#      works, because that is a modernisation the operator chooses, not a repair.
 #   3. References undefined var `nginx_port`
 
 - name: Configure webservers
   hosts: web-server-01
   become: true
   tasks:
-    - name: Add nginx signing key (DEPRECATED MODULE)
-      ansible.builtin.apt_key:
-        url: https://nginx.org/keys/nginx_signing.key
-        state: present
+    - name: Run the sidecar container (REMOVED MODULE)
+      ansible.builtin.docker:
+        image: nginx:latest
+        name: nginx-sidecar
+        state: started
 
     - name: Ensure nginx is installed
       ansible.builtin.apt:

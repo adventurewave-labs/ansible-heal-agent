@@ -160,6 +160,23 @@ def configured_inventory() -> Path | None:
     return None
 
 
+def configured_inventory_sources() -> list[str]:
+    """Every inventory source named by the repo's ansible.cfg, in order."""
+    cfg = repo_root() / "ansible.cfg"
+    if not cfg.is_file():
+        return []
+    parser = configparser.ConfigParser(allow_no_value=True, strict=False)
+    try:
+        parser.read(cfg)
+    except configparser.Error:
+        return []
+    for section in ("defaults", "inventory"):
+        if parser.has_option(section, "inventory"):
+            raw = parser.get(section, "inventory") or ""
+            return [p.strip() for p in raw.split(",") if p.strip()]
+    return []
+
+
 def inventory_path() -> Path:
     """Where the inventory lives: ansible.cfg's answer, else the default."""
     return configured_inventory() or (repo_root() / "ansible" / "inventory.yml")
@@ -209,6 +226,64 @@ def _defined_for_all(var: str, hosts: list[str], narrow: dict[str, str]) -> bool
         if not covered:
             return False
     return True
+
+
+def _inventory_vars(inv: dict) -> set[str]:
+    """Every name defined in a `vars:` block anywhere in the inventory.
+
+    These sit *below* group_vars/all in Ansible's precedence, so a "missing"
+    default written there does not fill a hole — it overrides a working value.
+    A repo deploying /srv/app-1.4.2 quietly started deploying /srv/app-.
+    """
+    names: set[str] = set()
+
+    def walk(node):
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            if key == "vars" and isinstance(value, dict):
+                names.update(str(k) for k in value)
+            elif isinstance(value, dict):
+                walk(value)
+
+    walk(inv)
+    return names
+
+
+def _referenced_vars_files(play: dict) -> set[str]:
+    """Names from `vars_files:` and `include_vars:`, which are invisible to a
+    static scan of the play but perfectly visible to Ansible."""
+    names: set[str] = set()
+    candidates: list[str] = []
+    files = play.get("vars_files")
+    if isinstance(files, list):
+        candidates.extend(str(f) for f in files if isinstance(f, str))
+    for task in play.get("tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        for key in ("include_vars", "ansible.builtin.include_vars"):
+            block = task.get(key)
+            if isinstance(block, str):
+                candidates.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("file"), str):
+                candidates.append(block["file"])
+    # `vars_files:` entries are relative to the playbook that names them, then
+    # to the repo. Trying only the repo-relative forms missed the ordinary
+    # `../vars/app.yml` spelling entirely.
+    bases = [repo_root() / "ansible", repo_root()]
+    source = play.get("_source_playbook")
+    if isinstance(source, str):
+        bases.insert(0, (repo_root() / source).parent)
+    for rel in candidates:
+        for base in bases:
+            path = (base / rel)
+            if path.is_file():
+                try:
+                    names.update(str(k) for k in _load_yaml(path))
+                except InputUnreadable:
+                    pass
+                break
+    return names
 
 
 def _load_narrow_vars() -> dict[str, str]:
@@ -699,6 +774,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     group_vars = _load_group_vars()
     narrow_vars = _load_narrow_vars()
     role_names = _role_defined_names()
+    inventory_var_names = _inventory_vars(inv)
     playbook = _expand_playbook(playbook_path)
 
     log_lines: list[str] = []
@@ -718,7 +794,8 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
         play_source = play.get("_source_playbook", str(playbook_path.relative_to(repo_root())))
         tasks = _plays_tasks(play, play_source)
         play_vars = play.get("vars") if isinstance(play.get("vars"), dict) else {}
-        bound_here = _names_bound_by_play(play) | role_names
+        bound_here = (_names_bound_by_play(play) | role_names
+                      | inventory_var_names | _referenced_vars_files(play))
 
         for task in tasks:
             task_name = task.get("name", "<unnamed task>")

@@ -28,9 +28,20 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _write(repo: Path, rel: str, content: str) -> None:
+    """Write a fixture file AND commit it.
+
+    Committing matters: the agent refuses to commit a file that already had
+    uncommitted changes, because `git commit -- <path>` takes the working-tree
+    state and would fold the operator's own work into a commit titled as an
+    automated fix. A fixture that leaves files uncommitted is indistinguishable
+    from that, and a real target repository is clean.
+    """
     path = repo / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(content).lstrip("\n"))
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "-m", f"fixture: {rel}"], cwd=repo,
+                   capture_output=True, check=False)
 
 
 def _play(hosts: str) -> str:
@@ -58,6 +69,20 @@ def _needs_var(hosts: str = "web-01") -> str:
     """
 
 
+def _commit_fixture(repo: Path) -> None:
+    """Commit the fixture's own setup.
+
+    The agent refuses to commit a file that already had uncommitted changes,
+    because `git commit -- <path>` takes the working-tree state and would fold
+    the operator's work into a commit titled as an automated fix. A fixture
+    that writes files without committing them looks exactly like that, so it
+    has to leave a clean tree — which is what a real target repository is.
+    """
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "-m", "fixture baseline"], cwd=repo,
+                   capture_output=True, check=False)
+
+
 @pytest.fixture
 def repo(scratch_repo: Path) -> Path:
     for stale in (scratch_repo / "ansible" / "playbooks").glob("*.yml"):
@@ -71,6 +96,7 @@ def repo(scratch_repo: Path) -> Path:
                 web-02: {}
     """)
     _write(scratch_repo, "ansible/group_vars/all.yml", "---\nenv: prod\n")
+    _commit_fixture(scratch_repo)
     return scratch_repo
 
 
@@ -1044,3 +1070,197 @@ def test_a_top_level_yaml_inventory_resolves(repo):
     result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
     assert result.exit_code == 0, result.failures
     assert sorted(result.succeeded_hosts) == ["db-01", "web-01", "web-02"]
+
+
+# ── what the agent cannot see ───────────────────────────────────────
+
+def test_a_dynamic_inventory_source_stops_every_rename(repo):
+    """The probe deliberately runs without the script, auto and constructed
+    plugins — those execute code the target repo supplies. So a repo using one
+    shows the probe fewer hosts than a real run has, and `hosts (0)` from a
+    partial view is not evidence a host is absent. A live host defined in a
+    static file, alongside a dynamic source, was renamed away on that basis and
+    the run reported success.
+    """
+    (repo / "ansible.cfg").write_text(
+        "[defaults]\ninventory = ansible/inventory.yml,ansible/inv/dynamic.py\n")
+    script = repo / "ansible" / "inv" / "dynamic.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/usr/bin/env python3\nprint('{}')\n")
+    script.chmod(0o755)
+    _write(repo, "ansible/playbooks/site.yml", _play("db-primary-01"))
+    before = (repo / "ansible" / "inventory.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert (repo / "ansible" / "inventory.yml").read_text() == before
+    assert any("cannot read safely" in d for d in result.declined), result.declined
+
+
+def test_an_unparsed_inventory_is_not_a_missing_host(repo, monkeypatch):
+    """ansible-core exits 0 and prints `hosts (0)` when it parsed no inventory
+    at all — by the number alone, indistinguishable from "that host is absent".
+    Only the second is grounds for deleting a host."""
+    from agent import diagnoser
+
+    empty = repo / "empty-dir"
+    empty.mkdir()
+    with __import__("agent.config", fromlist=["config"]).repo_root_override(empty):
+        assert diagnoser.ansible_resolves("db-primary-01") is None
+
+
+# ── variables the agent cannot see ──────────────────────────────────
+
+def test_a_variable_set_in_the_inventory_is_not_undefined(repo):
+    """Inventory `vars:` sit BELOW group_vars/all in Ansible's precedence, so
+    the "missing" default the agent writes does not fill a hole — it overrides
+    a working value. A repo deploying /srv/app-1.4.2 started deploying
+    /srv/app-."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          hosts:
+            web-01: {}
+          vars:
+            app_version: "1.4.2"
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: "deploying /srv/app-{{ app_version }}"
+    """)
+    before = (repo / "ansible" / "group_vars" / "all.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert result.success, result.declined
+    assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
+
+
+def test_a_variable_from_vars_files_is_not_undefined(repo):
+    _write(repo, "ansible/vars/app.yml", 'app_version: "2.0.0"\n')
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          vars_files:
+            - ../vars/app.yml
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: "{{ app_version }}"
+    """)
+    before = (repo / "ansible" / "group_vars" / "all.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert result.success, result.declined
+    assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
+
+
+# ── fix shapes the guard has to understand ──────────────────────────
+
+def test_an_llm_edit_file_on_the_inventory_is_refused(repo, monkeypatch):
+    """PROMPT_TEMPLATE asks the model for `edit_file` with search/replace, and
+    every content check in the guard reads old/new — so for the shape the agent
+    itself requests, all of them short-circuited. A host nothing had diagnosed
+    was deleted as collateral inside a replace span, and the guard approved it.
+    A free-text rewrite of an inventory is not something this agent can
+    validate, so it is not allowed to make one.
+    """
+    from agent import diagnoser
+
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "stale", "failure_type": "unreachable_host",
+        "fix": {"action": "edit_file", "target_file": "ansible/inventory.yml",
+                "search": "web-01:", "replace": "web-server-01:", "rationale": "r"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "unreachable_host", "pattern": "web-server-01",
+         "host": "web-server-01", "raw_pattern": "web-server-01"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", diag["fix"]
+    assert "free text" in diag["_no_fix_reason"]
+
+
+@pytest.mark.parametrize("spelling", [
+    "./ansible/inventory.yml",
+    "ansible//inventory.yml",
+    "ansible/inventory/staging.yml",
+    "ansible/hosts.yml",
+])
+def test_an_inventory_by_another_spelling_is_still_guarded(repo, monkeypatch, spelling):
+    """The check was `target == _inventory_rel() or endswith("inventory.yml")`,
+    so a path the patcher normalises but that string comparison misses skipped
+    every remaining guard."""
+    from agent import diagnoser
+
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "stale", "failure_type": "unreachable_host",
+        "fix": {"action": "edit_file", "target_file": spelling,
+                "search": "a", "replace": "b", "rationale": "r"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "unreachable_host", "pattern": "web-server-01",
+         "host": "web-server-01", "raw_pattern": "web-server-01"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", (spelling, diag["fix"])
+
+
+# ── the operator's own edits ────────────────────────────────────────
+
+def test_the_operators_uncommitted_work_is_never_committed(repo):
+    """`git commit -- <path>` commits the WORKING TREE state of that path. The
+    pathspec stops other files being swept in; it does nothing about other
+    changes to the same file. A staging bump the operator had marked "do not
+    ship" went into a commit titled as an automated fix."""
+    _write(repo, "ansible/playbooks/site.yml", _needs_var())
+    (repo / "ansible" / "group_vars" / "all.yml").write_text(
+        "---\nenv: prod\nsecret_debug: true   # WIP, do not ship\n")
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert not result.success
+    assert any("uncommitted changes" in d for d in result.declined), result.declined
+    log = _git(repo, "log", "-p", "--format=")
+    assert "do not ship" not in log
+
+
+# ── modules that are not actually broken ────────────────────────────
+
+def test_a_module_that_resolves_is_not_migrated(repo):
+    """apt_key resolves on ansible-core 2.19. The simulator declared it removed
+    and the agent rewrote a working playbook autonomously — a key *import*
+    became a file *download*, dropping `id:` and `state:`."""
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: key
+              ansible.builtin.apt_key:
+                url: https://example.invalid/key.gpg
+                id: 1655A0AB68576280
+                state: present
+    """)
+    before = (repo / "ansible" / "playbooks" / "site.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert (repo / "ansible" / "playbooks" / "site.yml").read_text() == before
+    assert any("resolves" in d for d in result.declined), result.declined
+
+
+def test_the_module_probe_reads_the_payload_not_the_exit_code(repo):
+    """`ansible-doc` exits 0 for a module it cannot find and says so in the
+    output. Reading the exit code alone reported every invented name as
+    resolvable — which would have disabled this guard entirely."""
+    from agent import diagnoser
+    assert diagnoser.module_resolves("apt_key") is True
+    assert diagnoser.module_resolves("docker") is False
+    assert diagnoser.module_resolves("totally_made_up_xyz") is False

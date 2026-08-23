@@ -21,14 +21,14 @@ $ ruff check .
 All checks passed!
 
 $ python3 -m pytest -q
-228 passed
+240 passed
 
 $ python3 -m pytest -q --cov=agent --cov=pipeline
-TOTAL  2151  351  858  156  81%
+TOTAL  2287 375 934 172 81%
 ```
 
 That is the command CI runs, and the one its `--cov-fail-under=78` gate applies
-to. Adding `--cov=scenarios` gives `TOTAL 2188 365 872 158 81%` — the previous
+to. Adding `--cov=scenarios` gives `TOTAL 2324 390 948 175 81%` — the previous
 version of this file printed the two-package totals under the three-package
 command, which is exactly the kind of thing this document exists to catch.
 
@@ -37,15 +37,15 @@ command, which is exactly the kind of thing this document exists to catch.
 | `agent/config.py` | 95% |
 | `agent/llm.py` | 97% |
 | `agent/pipeline_restarter.py` | 90% |
-| `pipeline/runner.py` | 87% |
-| `agent/committer.py` | 86% |
+| `pipeline/runner.py` | 86% |
+| `agent/committer.py` | 87% |
 | `agent/yaml_edit.py` | 81% |
 | `agent/cli.py` | 80% |
 | `agent/log_scanner.py` | 81% |
 | `agent/patcher.py` | 84% |
 | `agent/core.py` | 69% |
 | `agent/diagnoser.py` | 73% |
-| `pipeline/git_helper.py` | 83% |
+| `pipeline/git_helper.py` | 84% |
 
 The three lowest are named deliberately rather than omitted: `core.py`'s
 uncovered lines are mostly `Transcript` formatting, `git_helper.py` is the
@@ -81,7 +81,7 @@ The program output itself is real and unedited.
 
 The single most important result, because the previous implementation could not
 do it. `tests/test_destructive_inputs.py` is the most important file in the suite:
-forty-seven repositories the agent must not damage. Every one is a case where an
+fifty-nine repositories the agent must not damage. Every one is a case where an
 earlier version made a confident, committed change that destroyed something —
 a vault-encrypted secrets file rewritten as plaintext, a production host
 renamed out of the inventory to match a group name, an operator's half-finished
@@ -99,9 +99,11 @@ set at play level. Every one of them used to end in a traceback, a crash, or a
 confident "fix" applied to a working repository.
 
 `tests/test_perturbation.py` varies the undefined-variable name, the
-inventory/playbook host-name pair, and the module. It is **38 tests, of which
-26 require convergence** — 8 variable names, 4 host pairs, 2 modules and 12
-combinations. The other 12 are the counterweight: 8 pin the inferred defaults
+inventory/playbook host-name pair, and the module. It is **37 tests, of which
+25 require convergence** — 8 variable names, 4 host pairs, 1 module and 12
+combinations. Only one module now: the agent asks `ansible-doc` before
+migrating anything and refuses to rewrite a playbook whose module still
+resolves, so `apt_key` no longer belongs in a suite asserting convergence. The other 12 are the counterweight: 8 pin the inferred defaults
 and 4 assert the agent refuses rather than guessing.
 
 The specific regression that motivated the suite, reproduced ad hoc rather than
