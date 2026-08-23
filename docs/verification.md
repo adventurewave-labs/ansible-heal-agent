@@ -21,14 +21,14 @@ $ ruff check .
 All checks passed!
 
 $ python3 -m pytest -q
-240 passed
+245 passed
 
 $ python3 -m pytest -q --cov=agent --cov=pipeline
 TOTAL  2287 375 934 172 81%
 ```
 
 That is the command CI runs, and the one its `--cov-fail-under=78` gate applies
-to. Adding `--cov=scenarios` gives `TOTAL 2324 390 948 175 81%` — the previous
+to. Adding `--cov=scenarios` gives `TOTAL 2418 409 992 182 81%` — the previous
 version of this file printed the two-package totals under the three-package
 command, which is exactly the kind of thing this document exists to catch.
 
@@ -38,14 +38,14 @@ command, which is exactly the kind of thing this document exists to catch.
 | `agent/llm.py` | 97% |
 | `agent/pipeline_restarter.py` | 90% |
 | `pipeline/runner.py` | 86% |
-| `agent/committer.py` | 87% |
+| `agent/committer.py` | 85% |
 | `agent/yaml_edit.py` | 81% |
 | `agent/cli.py` | 80% |
 | `agent/log_scanner.py` | 81% |
 | `agent/patcher.py` | 84% |
-| `agent/core.py` | 69% |
-| `agent/diagnoser.py` | 73% |
-| `pipeline/git_helper.py` | 84% |
+| `agent/core.py` | 70% |
+| `agent/diagnoser.py` | 75% |
+| `pipeline/git_helper.py` | 81% |
 
 The three lowest are named deliberately rather than omitted: `core.py`'s
 uncovered lines are mostly `Transcript` formatting, `git_helper.py` is the
@@ -81,7 +81,7 @@ The program output itself is real and unedited.
 
 The single most important result, because the previous implementation could not
 do it. `tests/test_destructive_inputs.py` is the most important file in the suite:
-fifty-nine repositories the agent must not damage. Every one is a case where an
+sixty-three repositories the agent must not damage. Every one is a case where an
 earlier version made a confident, committed change that destroyed something —
 a vault-encrypted secrets file rewritten as plaintext, a production host
 renamed out of the inventory to match a group name, an operator's half-finished
