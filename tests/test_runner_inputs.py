@@ -109,13 +109,23 @@ def test_a_group_in_a_flat_inventory_resolves(repo):
     assert result.exit_code == 0, result.failures
 
 
+def test_exclusion_intersection_and_regex_patterns_resolve(repo):
+    """`:` union, `!` exclusion, `&` intersection and `~regex` are ordinary
+    Ansible. Treating them as unevaluable made any repo using them look like a
+    failing pipeline."""
+    _write(repo, "ansible/playbooks/site.yml", _play("'all:!db-01'"))
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+    assert result.succeeded_hosts == ["web-01"], result.succeeded_hosts
+
+
 def test_a_pattern_the_simulator_cannot_parse_is_reported_as_such(repo):
-    """The honest answer to `webservers:!db-01` is "I cannot evaluate this".
+    """The honest answer to a host range is "I cannot evaluate this".
 
     Reporting it as a missing host was a claim about the repository, and the
     diagnoser acted on that claim.
     """
-    _write(repo, "ansible/playbooks/site.yml", _play("'webservers:!db-01'"))
+    _write(repo, "ansible/playbooks/site.yml", _play("'web-0[1:2]'"))
     before = (repo / "ansible" / "inventory.yml").read_text()
 
     result = heal(max_retries=3, use_llm=False)
@@ -196,3 +206,100 @@ def test_a_variable_set_on_the_play_is_not_undefined(repo):
 
     assert result.success
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
+
+
+# ── file shapes and encodings ───────────────────────────────────────
+
+def test_a_fifo_is_refused_rather_than_blocking_forever(repo):
+    """Opening a FIFO blocks until a writer appears, which in practice is
+    never. The run hung until it was killed."""
+    import os
+    (repo / "ansible" / "inventory.yml").unlink()
+    os.mkfifo(repo / "ansible" / "inventory.yml")
+
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+
+    assert result.exit_code == 2
+    assert "not a regular file" in result.failures[0]["message"]
+
+
+def test_a_list_shaped_inventory_is_reported_not_raised(repo):
+    """A list is valid YAML that every caller then indexes as a mapping; it
+    escaped as AttributeError from deep inside the run."""
+    (repo / "ansible" / "inventory.yml").write_text("- web-01\n- web-02\n")
+    _write(repo, "ansible/playbooks/site.yml", _play("web-01"))
+
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+
+    assert result.exit_code == 2
+    assert result.failures[0]["type"] == "unreadable_input"
+    assert "not a mapping" in result.failures[0]["message"]
+
+
+def test_a_vault_encrypted_input_is_named_as_such(repo):
+    """"not a mapping" is true of ciphertext and useless to the operator."""
+    (repo / "ansible" / "group_vars" / "all.yml").write_text(
+        "$ANSIBLE_VAULT;1.1;AES256\n3762343338316632\n")
+    _write(repo, "ansible/playbooks/site.yml", _play("web-01"))
+
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+
+    assert result.exit_code == 2
+    assert "vault" in result.failures[0]["message"].lower()
+
+
+def test_crlf_line_endings_survive_a_patch(repo):
+    """read_text/write_text normalise CRLF to LF, so a one-line change to a
+    Windows-authored file came out as a whole-file rewrite."""
+    from agent import patcher
+    target = repo / "ansible" / "group_vars" / "all.yml"
+    target.write_bytes(b"---\r\nenv: prod\r\n")
+
+    patcher.apply_fix({"action": "set_yaml_key",
+                       "target_file": "ansible/group_vars/all.yml",
+                       "key": "nginx_port", "value": 8080})
+
+    raw = target.read_bytes()
+    assert b"\r\n" in raw
+    assert b"\n" not in raw.replace(b"\r\n", b""), "mixed line endings"
+    assert b"nginx_port" in raw
+
+
+def test_a_byte_order_mark_survives_a_patch(repo):
+    """The BOM was stripped, and it took the leading `---` with it."""
+    from agent import patcher
+    target = repo / "ansible" / "group_vars" / "all.yml"
+    target.write_bytes(b"\xef\xbb\xbf---\n# comment\nenv: prod\n")
+
+    patcher.apply_fix({"action": "set_yaml_key",
+                       "target_file": "ansible/group_vars/all.yml",
+                       "key": "nginx_port", "value": 8080})
+
+    raw = target.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf---"), raw[:20]
+    assert b"# comment" in raw
+
+
+def test_a_partly_failed_write_does_not_truncate_the_original(repo, monkeypatch):
+    """write_text truncates first, so ENOSPC left the operator with a file cut
+    off mid-key that still parsed as YAML — nothing downstream noticed."""
+    from agent import patcher
+    target = repo / "ansible" / "group_vars" / "all.yml"
+    target.write_text("---\nenv: prod\nkeep: yes\n")
+    before = target.read_text()
+
+    real_replace = patcher.os.replace
+
+    def explode(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(patcher.os, "replace", explode)
+    with pytest.raises(patcher.PatchError):
+        patcher.apply_fix({"action": "set_yaml_key",
+                           "target_file": "ansible/group_vars/all.yml",
+                           "key": "nginx_port", "value": 8080})
+    monkeypatch.setattr(patcher.os, "replace", real_replace)
+
+    assert target.read_text() == before, "the original was damaged"
+    leftovers = list((repo / "ansible" / "group_vars").glob(".*tmp"))
+    assert leftovers == [], f"left a temp file behind: {leftovers}"

@@ -1,13 +1,13 @@
 # Ansible-Heal-Agent — Demo Transcript
 
-- Started: `2026-08-22 22:45:10 UTC`
+- Started: `2026-08-23 03:53:00 UTC`
 - LLM bridge: `disabled` — every diagnosis below is deterministic
 
 ---
 
 ## Iteration 0
 
-- Pipeline run log: `pipeline/runs/run-20260822-224510-iter0.log`
+- Pipeline run log: `pipeline/runs/run-20260823-035300-iter0.log`
 - Exit code: `2`
 - 3 failure(s) detected.
 
@@ -66,7 +66,7 @@
          name: nginx
 ```
 
-- committed: `f85a7e71e9d2` → `ansible/playbooks/webservers.yml`
+- committed: `f0edf968ad92` → `ansible/playbooks/webservers.yml`
 
 ### Failure detected
 ```json
@@ -109,7 +109,7 @@
 +nginx_port: 8080
 ```
 
-- committed: `d6fb2775a3db` → `ansible/group_vars/all.yml`
+- committed: `f5a1874c6c99` → `ansible/group_vars/all.yml`
 
 ### Failure detected
 ```json
@@ -155,11 +155,11 @@
          web-02:
 ```
 
-- committed: `350c22d82aba` → `ansible/inventory.yml`
+- committed: `14f0e2a8a192` → `ansible/inventory.yml`
 
 ## Iteration 1
 
-- Pipeline run log: `pipeline/runs/run-20260822-224510-iter1.log`
+- Pipeline run log: `pipeline/runs/run-20260823-035301-iter1.log`
 - Exit code: `0`
 - 0 failure(s) detected.
 
@@ -167,7 +167,7 @@
 
 ```
 PLAYBOOK: site.yml ***********************************
-PLAY [configure stack] : started at 2026-08-22 22:45:10
+PLAY [configure stack] : started at 2026-08-23 03:53:01
 
 PHASE A: Parse-time validation
 
@@ -212,9 +212,9 @@ EXIT CODE: 0
 
 ### Recent git log
 ```
-350c22d 2026-08-22 fix(inventory): rename host to match playbook expectation
-d6fb277 2026-08-22 fix(vars): add missing variable to group_vars
-f85a7e7 2026-08-22 fix(playbook): migrate deprecated module to modern equivalent
-c0bfe52 2026-08-22 chore: reset to broken baseline
+14f0e2a 2026-08-23 fix(inventory): rename host to match playbook expectation
+f5a1874 2026-08-23 fix(vars): add missing variable to group_vars
+f0edf96 2026-08-23 fix(playbook): migrate deprecated module to modern equivalent
+6339615 2026-08-23 chore: reset to broken baseline
 ```
 

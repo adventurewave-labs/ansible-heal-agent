@@ -73,6 +73,16 @@ ansible-heal run --repo ~/infra
 
 These are implemented and tested, not planned.
 
+**One writer per repository.** Git's index is a single shared file. Two
+concurrent runs interleaved `add` and `commit` badly enough that one run's
+staged edit landed inside the other's commit, so apply and PR modes take an
+exclusive lock on the target repo for the duration.
+
+**Writes are atomic.** A patch goes to a temp file in the same directory and is
+renamed over the target. `write_text` truncates first, so a write that failed
+part-way — a full disk, a quota — left a file cut off mid-key that still parsed
+as YAML, which meant nothing downstream noticed.
+
 **Write allowlist.** The patcher refuses any target outside
 `ANSIBLE_HEAL_ALLOWED_PATHS` (default `ansible/**`), checked before the file is
 touched at all. Since the target path can come from an LLM, this is what stops a
@@ -145,16 +155,41 @@ NO FIX: no inventory host resembles 'web-server-01' (inventory has
 proposed
 ```
 
+**A `hosts:` pattern that is not one stale hostname.** This is where most of
+the damage lived, and every case below was a real repository the agent broke
+while reporting success:
+
+- a *group* name — an empty group (a tier scaled to zero, a dynamic-inventory
+  placeholder) makes Ansible skip the play and exit 0. Renaming the nearest
+  host to match deletes a live host and creates a group/host collision
+- `localhost`, which Ansible always provides implicitly. Renaming a real host
+  to it redirects every later localhost play at that machine
+- a multi-host pattern — `web-01 db-01`, `web-01,db-01`, a YAML list. These
+  resolve properly now; when one cannot, it is not a hostname to rename to
+- `all` or `*` matching nothing, which means the inventory is empty
+- any pattern containing `: ! & [ ] * ~` — those are pattern syntax, not names
+
+**The repository's own state.**
+
+- ansible-vault encrypted files are never read or rewritten. The ciphertext is
+  a valid YAML scalar, so a validity check alone passes it and a string-replace
+  edit writes plaintext over the operator's secrets
+- a hardlinked target, whose other names the write surface cannot bound
+- a merge, rebase, cherry-pick, revert or bisect in progress — the agent will
+  not commit into a half-finished operation and conclude it for you
+- a detached HEAD, where commits would be unreachable from any branch
+- a commit git itself refuses: a failing hook, a submodule, an ignored path
+- a file missing, unreadable, not a regular file, or not the YAML shape its
+  caller needs
+
+**The ordinary cases.**
+
 - no inventory host close enough to the one the play targets
 - an inventory host another play still targets, where renaming it would break
   that play
 - a module with no known replacement in `MODULE_REPLACEMENTS`
-- a variable that is already defined — in `group_vars`, or on the play or the
-  task — will not be overwritten
-- a host pattern the bundled simulator cannot evaluate (`webservers:!db-01` and
-  friends). It says so and stops, rather than reporting a host that does not
-  exist; `PIPELINE_RUNNER=real` hands the pattern to Ansible itself
-- a file the run needs that is missing or is not parseable YAML
+- a variable already defined anywhere Ansible would look — `group_vars/all*`,
+  `group_vars/<group>`, `host_vars/`, the play, or the task
 - any failure class it has no rule for
 
 A refusal is a result. `heal()` returns them on `HealResult.declined`, and the
@@ -214,7 +249,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 174 tests
+make test          # 194 tests
 make lint
 ```
 

@@ -75,7 +75,7 @@ class InputUnreadable(RuntimeError):
     """A file the run needs is missing or is not parseable YAML."""
 
 
-def _load_yaml(path: Path) -> dict:
+def _load_yaml(path: Path, expect: str = "mapping"):
     """Load a YAML mapping, or raise InputUnreadable.
 
     Previously this let FileNotFoundError and yaml.YAMLError escape to the CLI
@@ -83,6 +83,20 @@ def _load_yaml(path: Path) -> dict:
     typo — exited 1 with a stack trace instead of a reported failure.
     """
     try:
+        if path.is_file():
+            head = path.open("rb").read(len(b"$ANSIBLE_VAULT"))
+            if head == b"$ANSIBLE_VAULT":
+                # Say what it is. "not a mapping" is true but useless: the
+                # operator needs to know the agent found encrypted content and
+                # will not touch it.
+                raise InputUnreadable(
+                    f"{_rel(path)} is ansible-vault encrypted; the agent has no "
+                    f"vault password and will not read or rewrite it")
+        if path.exists() and not path.is_file():
+            # Opening a FIFO blocks until a writer appears — forever, in
+            # practice. A device node is no better.
+            raise InputUnreadable(
+                f"{_rel(path)} is not a regular file")
         with path.open() as fh:
             data = yaml.safe_load(fh)
     except FileNotFoundError as e:
@@ -92,10 +106,22 @@ def _load_yaml(path: Path) -> dict:
     except yaml.YAMLError as e:
         raise InputUnreadable(f"{_rel(path)} is not valid YAML: {e}") from e
     if data is None:
-        return {}
-    if not isinstance(data, (dict, list)):
+        return [] if expect == "list" else {}
+    if expect == "list":
+        # A playbook is a list of plays. A mapping is a single play, which
+        # Ansible also accepts.
+        if isinstance(data, dict):
+            return [data]
+        if not isinstance(data, list):
+            raise InputUnreadable(
+                f"{_rel(path)} is a YAML {type(data).__name__}, not a list of plays")
+        return data
+    if not isinstance(data, dict):
+        # A list parses as YAML but every caller of an inventory or a vars file
+        # indexes it as a mapping. This used to escape as AttributeError or
+        # TypeError from deep inside the run.
         raise InputUnreadable(
-            f"{_rel(path)} is a {type(data).__name__}, not a YAML mapping")
+            f"{_rel(path)} is a YAML {type(data).__name__}, not a mapping")
     return data
 
 
@@ -109,12 +135,51 @@ _GROUP_VARS_CANDIDATES = (
 
 
 def _load_group_vars() -> dict:
-    """Group vars, or an empty mapping. Absence is legal; a typo is not."""
+    """Every variable Ansible would see from group_vars and host_vars.
+
+    Only ``group_vars/all*`` used to be read, so a variable defined in
+    ``group_vars/webservers.yml`` or ``host_vars/web-01.yml`` looked undefined
+    and the agent committed a fabricated default for it. Those are false
+    failures with a junk commit attached, even though Ansible's precedence
+    means the operator's value still won at runtime.
+
+    Merged shallowly and only to answer "is this name defined anywhere?" — the
+    agent does not attempt to model Ansible's precedence, and does not need to.
+    """
+    merged: dict = {}
     for rel in _GROUP_VARS_CANDIDATES:
         path = repo_root() / rel
         if path.is_file():
-            return _load_yaml(path)
-    return {}
+            merged.update(_load_yaml(path))
+            break
+    for directory in ("ansible/group_vars", "ansible/host_vars"):
+        base = repo_root() / directory
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if path.is_file() and path.suffix in (".yml", ".yaml"):
+                try:
+                    merged.update(_load_yaml(path))
+                except InputUnreadable:
+                    # One unreadable vars file must not sink the whole run;
+                    # the file the agent actually writes to is checked properly.
+                    continue
+    return merged
+
+
+#: A log line per host per task is fine for a demo inventory and absurd for a
+#: real one — 5,000 hosts x 500 tasks produced a 42 MB file per run, written
+#: into the operator's repository. Beyond this many hosts the line is summarised.
+_MAX_HOSTS_LOGGED = 20
+
+
+def _host_lines(kind: str, hosts: list[str], template: str = "ok: [{h}]") -> str:
+    shown = hosts[:_MAX_HOSTS_LOGGED]
+    parts = [template.format(h=h) for h in shown]
+    if len(hosts) > _MAX_HOSTS_LOGGED:
+        parts.append(f"... and {len(hosts) - _MAX_HOSTS_LOGGED} more host(s)")
+    sep = "  " if kind == "recap" else "\n"
+    return sep.join(parts)
 
 
 def _rel(path: Path) -> str:
@@ -134,9 +199,7 @@ def _expand_playbook(playbook_path: Path) -> list[dict]:
     """
     # Resolve to absolute so relative_to(repo_root()) works regardless of cwd.
     playbook_path = playbook_path.resolve()
-    raw = _load_yaml(playbook_path)
-    if not isinstance(raw, list):
-        raw = [raw]
+    raw = _load_yaml(playbook_path, expect="list")
 
     expanded: list[dict] = []
     for entry in raw:
@@ -149,11 +212,6 @@ def _expand_playbook(playbook_path: Path) -> list[dict]:
             expanded.append(entry)
     return expanded
 
-
-#: Ansible pattern syntax this simulator does not implement. Seeing one of
-#: these is not evidence that the inventory is wrong, so the runner reports it
-#: as its own limitation rather than inventing a host failure.
-_UNSUPPORTED_PATTERN_CHARS = (":", "!", "&", "[", "~")
 
 
 def _pattern_parts(pattern) -> list[str] | None:
@@ -168,15 +226,30 @@ def _pattern_parts(pattern) -> list[str] | None:
     Returns ``None`` if any part uses syntax this simulator cannot evaluate.
     """
     if isinstance(pattern, (list, tuple)):
-        parts = [str(p).strip() for p in pattern]
+        raw = [str(p) for p in pattern]
+    elif pattern is None:
+        # `hosts:` present but empty. Ansible rejects this outright rather than
+        # matching nothing; str(None) used to produce a pattern of "None".
+        return None
     else:
-        parts = [p.strip() for p in str(pattern).split(",")]
-    parts = [p for p in parts if p]
+        raw = [str(pattern)]
+    # Ansible separates patterns on commas, semicolons AND whitespace. Handling
+    # only the comma meant `hosts: web-01 db-01` matched nothing, and the
+    # diagnoser renamed a host to that literal string.
+    parts: list[str] = []
+    for item in raw:
+        parts.extend(re.split(r"[,;\s]+", item))
+    parts = [p.strip() for p in parts if p and p.strip()]
     if not parts:
         return None
-    if any(any(c in p for c in _UNSUPPORTED_PATTERN_CHARS) for p in parts):
+    # Ranges (`web-0[1:3]`) are checked before the ":" split, which would
+    # otherwise cut them in half and hide them.
+    if any("[" in p or "]" in p for p in parts):
         return None
-    return parts
+    expanded: list[str] = []
+    for part in parts:
+        expanded.extend(p for p in part.split(":") if p)
+    return expanded or None
 
 
 def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
@@ -190,27 +263,44 @@ def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
     flat: dict[str, dict] = {}
     groups: dict[str, list[str]] = {}
 
-    def walk(node):
-        if not isinstance(node, dict):
-            return
-        for k, v in node.items():
-            if k == "hosts" and isinstance(v, dict):
-                flat.update(v)
-            elif k == "children" and isinstance(v, dict):
-                for gk, gv in v.items():
-                    if isinstance(gv, dict):
-                        groups.setdefault(gk, [])
-                        groups[gk].extend((gv.get("hosts") or {}).keys())
-                        walk(gv)
-            elif isinstance(v, dict):
-                # Flat group: a mapping that itself carries hosts.
-                if isinstance(v.get("hosts"), dict):
-                    groups.setdefault(k, [])
-                    groups[k].extend(v["hosts"].keys())
-                walk(v)
+    def collect(node, group_name: str | None) -> list[str]:
+        """Return every host reachable from ``node``, registering groups.
 
-    walk(inv.get("all", inv))
-    return flat, groups
+        Returns the transitive host list so a parent group gets its children's
+        hosts too. Collecting only ``gv["hosts"]`` meant a parent group like
+        `prod` (children: webservers, dbservers) resolved to zero hosts — and
+        the agent then "fixed" that by renaming a host to the group's name.
+        """
+        if not isinstance(node, dict):
+            return []
+        mine: list[str] = []
+        own = node.get("hosts")
+        if isinstance(own, dict):
+            for host, meta in own.items():
+                flat.setdefault(str(host), meta if isinstance(meta, dict) else {})
+                mine.append(str(host))
+        children = node.get("children")
+        if isinstance(children, dict):
+            for child_name, child in children.items():
+                mine.extend(collect(child, str(child_name)))
+        # The flat form: a group mapping sitting directly under its parent.
+        # `vars:` is explicitly excluded — a variable that happens to be called
+        # `hosts` used to register as a group with phantom members.
+        for key, value in node.items():
+            if key in ("hosts", "children", "vars", "_meta"):
+                continue
+            if isinstance(value, dict) and any(
+                    k in value for k in ("hosts", "children")):
+                mine.extend(collect(value, str(key)))
+        if group_name is not None:
+            groups.setdefault(group_name, [])
+            groups[group_name].extend(mine)
+        return mine
+
+    root = inv.get("all", inv)
+    all_hosts = collect(root, "all" if "all" in inv else None)
+    groups.setdefault("all", list(dict.fromkeys(all_hosts)))
+    return flat, {g: list(dict.fromkeys(h)) for g, h in groups.items()}
 
 
 def _hosts_in_inventory(inv: dict, pattern) -> list[str] | None:
@@ -228,20 +318,44 @@ def _hosts_in_inventory(inv: dict, pattern) -> list[str] | None:
 
     flat, groups = _inventory_index(inv)
 
-    matched: list[str] = []
-    for part in parts:
-        if part == "all":
-            matched.extend(flat.keys())
-        elif part in flat:
-            matched.append(part)
-        elif part in groups:
-            matched.extend(groups[part])
-        elif "*" in part:
-            regex = re.compile("^" + part.replace("*", ".*") + "$")
-            matched.extend(h for h in flat if regex.match(h))
+    def resolve(term: str) -> list[str]:
+        if term == "localhost" and term not in flat:
+            # Ansible always provides an implicit localhost. A play targeting it
+            # is not evidence of a stale inventory entry.
+            return [term]
+        if term == "all":
+            return list(flat.keys())
+        if term in flat:
+            return [term]
+        if term in groups:
+            return list(groups[term])
+        if term.startswith("~"):
+            try:
+                regex = re.compile(term[1:])
+            except re.error:
+                return []
+            return [h for h in flat if regex.search(h)]
+        if "*" in term:
+            regex = re.compile("^" + re.escape(term).replace(r"\*", ".*") + "$")
+            return [h for h in flat if regex.match(h)]
+        return []
 
-    # De-duplicate, preserving order.
-    return list(dict.fromkeys(matched))
+    # Ansible semantics: bare terms union, `!term` excludes, `&term` intersects.
+    matched: list[str] = []
+    excluded: set[str] = set()
+    intersections: list[set[str]] = []
+    for part in parts:
+        if part.startswith("!"):
+            excluded.update(resolve(part[1:]))
+        elif part.startswith("&"):
+            intersections.append(set(resolve(part[1:])))
+        else:
+            matched.extend(resolve(part))
+
+    result = [h for h in dict.fromkeys(matched) if h not in excluded]
+    for keep in intersections:
+        result = [h for h in result if h in keep]
+    return result
 
 
 def _check_removed_modules(task: dict) -> str | None:
@@ -289,6 +403,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     log_path = runs_dir() / f"run-{run_id}.log"
     failures: list[dict] = []
     succeeded: list[str] = []
+    succeeded_set: set[str] = set()
 
     # Resolve playbook_path to absolute so relative_to(repo_root()) works from any cwd.
     playbook_path = playbook_path.resolve()
@@ -444,16 +559,19 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
                     log_lines.append(f"fatal: [{f.get('host', '?')}]: FAILED! => {f['message']}")
                 continue
 
-            # Success path
+            # Success path. `succeeded_set` mirrors `succeeded` purely for
+            # membership: the list scan made this O(tasks x hosts^2), which on
+            # a 5,000-host inventory was ~100s of CPU and a 42 MB log.
             for h in hosts:
-                if h not in succeeded:
+                if h not in succeeded_set:
+                    succeeded_set.add(h)
                     succeeded.append(h)
-                log_lines.append(f"ok: [{h}]")
+            log_lines.append(_host_lines("ok", hosts))
             log_lines.append("")
 
         log_lines.append(
-            "PLAY RECAP: " + "  ".join(
-                f"{h} : ok=1  changed=0  unreachable=0  failed=0" for h in hosts
+            "PLAY RECAP: " + _host_lines(
+                "recap", hosts, "{h} : ok=1  changed=0  unreachable=0  failed=0"
             )
         )
         log_lines.append("")
@@ -504,8 +622,18 @@ def _merge_failures(primary: list[dict], extra: list[dict]) -> list[dict]:
             return (t, f.get("pattern") or f.get("host"))
         return (t, f.get("host"), f.get("task"))
 
-    seen = {key(f) for f in primary}
-    merged = list(primary)
+    # Collapse `primary` against itself first. The callback emits one record
+    # per failing *host*, so an undefined variable on N hosts produced N
+    # identical proposals and N-1 spurious "already defined" patch failures —
+    # the symptom de-duplication exists to prevent, surviving inside one source.
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+    for f in primary:
+        k = key(f)
+        if k in seen:
+            continue
+        seen.add(k)
+        merged.append(f)
     for f in extra:
         if key(f) not in seen:
             seen.add(key(f))
@@ -563,8 +691,17 @@ def run_real(playbook_path: Path, run_id: str | None = None) -> RunResult:
 
     payload = log_scanner.read_sidecar(log_path)
     failures = list(payload) if payload else []
-    failures = _merge_failures(
-        failures, log_scanner.extract_failures(log_path, text_only=True))
+
+    text_failures = log_scanner.extract_failures(log_path, text_only=True)
+    if sidecar.exists():
+        # The callback ran, so it is authoritative for no_hosts_matched: it
+        # fires only when a play matched *nothing*. Ansible prints the same
+        # WARNING for each unmatched entry of a multi-part pattern even when
+        # the play ran fine on the others, and scraping that turned a green run
+        # into a destructive rename of a host that was working.
+        text_failures = [f for f in text_failures
+                         if f.get("type") != "no_hosts_matched"]
+    failures = _merge_failures(failures, text_failures)
 
     ok_hosts: list[str] = []
     if sidecar.exists():
