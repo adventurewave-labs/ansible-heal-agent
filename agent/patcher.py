@@ -64,7 +64,7 @@ class VaultRefused(PatchError):
 
 
 def _refuse_if_vault(path: Path, original: str, target_rel: str) -> None:
-    stripped = original.lstrip("﻿ \t\r\n")
+    stripped = original.lstrip("\ufeff \t\r\n")
     if stripped.startswith(_VAULT_HEADER):
         raise VaultRefused(
             f"refusing to write {target_rel}: it is ansible-vault encrypted. "
@@ -208,7 +208,7 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     if not dry_run:
         restored = patched.replace("\n", "\r\n") if crlf else patched
         if bom:
-            restored = "﻿" + restored
+            restored = "\ufeff" + restored
         try:
             _write_atomically(target, restored)
         except OSError as e:
