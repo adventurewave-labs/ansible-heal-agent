@@ -74,9 +74,26 @@ ansible-heal run --repo ~/infra
 These are implemented and tested, not planned.
 
 **The destructive step asks ansible-core, not the simulator.** Before any
-inventory rename, the agent runs `ansible <pattern> --list-hosts` against the
-repo's own inventory. If ansible-core resolves the pattern, no rename is
-proposed, whatever the simulator concluded.
+inventory rename — from the deterministic diagnoser *or* from the LLM — the
+agent runs `ansible <pattern> --list-hosts` and lets ansible-core resolve its
+own inventory, exactly as it would for a real run: the repo's `ansible.cfg`, a
+comma-separated inventory list, `ANSIBLE_CONFIG`, `ANSIBLE_INVENTORY`. If
+ansible-core resolves the pattern, no rename is proposed, whatever the
+simulator concluded.
+
+Two things this gets wrong easily, both of which it got wrong before:
+
+- Handing `ansible` the agent's own guess with `-i` overrides the very thing
+  being asked about. On a repo listing two inventory files the probe saw one of
+  them, answered "no such host" truthfully, and a live host in the other was
+  renamed away.
+- A probe that cannot answer returns "unknown", never "no". Collapsing those
+  would let any environment problem re-open every hole the gate exists to close.
+
+The probe runs with only ansible's builtin file parsers enabled and no plugin
+path from the target repo, because `--dry-run` is the mode you point at a
+repository you have not decided to trust, and a third-party inventory plugin is
+executable code that repository supplies.
 
 This is the single most important line of defence in the project, and it exists
 because of a shape that repeated across six audit rounds: the simulator failed
@@ -289,7 +306,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 216 tests
+make test          # 228 tests
 make lint
 ```
 

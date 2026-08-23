@@ -21,20 +21,20 @@ $ ruff check .
 All checks passed!
 
 $ python3 -m pytest -q
-216 passed
+228 passed
 
 $ python3 -m pytest -q --cov=agent --cov=pipeline
-TOTAL  2051  337  794  142  81%
+TOTAL  2151  351  858  156  81%
 ```
 
 That is the command CI runs, and the one its `--cov-fail-under=78` gate applies
-to. Adding `--cov=scenarios` gives `TOTAL 2088 352 808 145 81%` — the previous
+to. Adding `--cov=scenarios` gives `TOTAL 2188 365 872 158 81%` — the previous
 version of this file printed the two-package totals under the three-package
 command, which is exactly the kind of thing this document exists to catch.
 
 | file | coverage |
 |---|---|
-| `agent/config.py` | 96% |
+| `agent/config.py` | 95% |
 | `agent/llm.py` | 97% |
 | `agent/pipeline_restarter.py` | 90% |
 | `pipeline/runner.py` | 87% |
@@ -44,7 +44,7 @@ command, which is exactly the kind of thing this document exists to catch.
 | `agent/log_scanner.py` | 81% |
 | `agent/patcher.py` | 84% |
 | `agent/core.py` | 69% |
-| `agent/diagnoser.py` | 70% |
+| `agent/diagnoser.py` | 73% |
 | `pipeline/git_helper.py` | 83% |
 
 The three lowest are named deliberately rather than omitted: `core.py`'s
@@ -81,7 +81,7 @@ The program output itself is real and unedited.
 
 The single most important result, because the previous implementation could not
 do it. `tests/test_destructive_inputs.py` is the most important file in the suite:
-thirty-five repositories the agent must not damage. Every one is a case where an
+forty-seven repositories the agent must not damage. Every one is a case where an
 earlier version made a confident, committed change that destroyed something —
 a vault-encrypted secrets file rewritten as plaintext, a production host
 renamed out of the inventory to match a group name, an operator's half-finished

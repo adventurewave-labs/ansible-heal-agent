@@ -204,6 +204,20 @@ def inventory_groups(text: str) -> set[str]:
 
 
 def rename_host(text: str, old: str, new: str) -> str:
+    """Rename a host key. Refuses to rename onto a name that already exists.
+
+    The rebuild below is order-preserving but assignment-based, so renaming
+    `web-01` to an existing `web-02` produced a mapping with one key: two hosts
+    in, one host out, no error.
+    """
+    if old != new and new in inventory_hosts(text):
+        raise YamlEditError(
+            f"cannot rename '{old}' to '{new}': '{new}' is already a host in "
+            f"this inventory, and the rename would delete one of them")
+    return _rename_host(text, old, new)
+
+
+def _rename_host(text: str, old: str, new: str) -> str:
     """Rename a host key in an inventory, preserving its position and vars."""
     data = load(text)
     renamed = False

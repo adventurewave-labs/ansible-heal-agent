@@ -450,8 +450,22 @@ def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
             groups[group_name].extend(mine)
         return mine
 
-    root = inv.get("all", inv)
-    all_hosts = collect(root, "all" if "all" in inv else None)
+    if "all" in inv:
+        # Groups live under `all: children:`. A mapping placed directly under
+        # `all:` is skipped by ansible-core ("Skipping unexpected key … only
+        # vars, children and hosts are valid"), which `collect` reproduces.
+        all_hosts = collect(inv["all"], "all")
+    else:
+        # No `all:` key — every top-level key is a group. This is the standard
+        # documented YAML inventory layout, and reading it with the rule above
+        # resolved every pattern in such a repo to zero hosts.
+        all_hosts = []
+        for name, node in inv.items():
+            if not isinstance(node, dict):
+                continue
+            if name == "_meta":
+                continue
+            all_hosts.extend(collect(node, str(name)))
     groups.setdefault("all", list(dict.fromkeys(all_hosts)))
 
     # Group names are global in Ansible: `prod: {children: {webservers: {}}}`
@@ -572,6 +586,76 @@ def _check_removed_modules(task: dict) -> str | None:
     return None
 
 
+#: Names Ansible provides itself. Writing a global default for any of these
+#: does not fix anything and can change behaviour everywhere.
+_ANSIBLE_PROVIDED = frozenset({
+    "item", "ansible_facts", "ansible_hostname", "ansible_host", "inventory_hostname",
+    "inventory_hostname_short", "groups", "group_names", "hostvars", "play_hosts",
+    "ansible_play_hosts", "ansible_play_batch", "ansible_version", "role_name",
+    "role_path", "playbook_dir", "inventory_dir", "omit", "ansible_connection",
+    "ansible_user", "ansible_port", "ansible_env", "ansible_date_time",
+    "ansible_loop", "ansible_index_var", "ansible_search_path", "environment",
+})
+
+
+def _names_bound_by_play(play: dict) -> set[str]:
+    """Variables a play defines for itself: set_fact, register, loop_var, vars.
+
+    The whole-task scan added in a previous round treats every ``{{ name }}``
+    as a variable that must exist in group_vars. It does not: `item` comes from
+    a loop, a `register:` name from an earlier task, a `set_fact:` key from the
+    play itself. Reporting those as undefined produced junk commits writing
+    empty globals — and a global outranks a role default, so a repo deploying
+    /srv/app-1.4.2 quietly started deploying /srv/app-.
+    """
+    bound: set[str] = set(_ANSIBLE_PROVIDED)
+    if isinstance(play.get("vars"), dict):
+        bound.update(str(k) for k in play["vars"])
+    tasks = play.get("tasks")
+    if not isinstance(tasks, list):
+        return bound
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if isinstance(task.get("vars"), dict):
+            bound.update(str(k) for k in task["vars"])
+        register = task.get("register")
+        if isinstance(register, str):
+            bound.add(register)
+        for key in ("set_fact", "ansible.builtin.set_fact"):
+            block = task.get(key)
+            if isinstance(block, dict):
+                bound.update(str(k) for k in block if k != "cacheable")
+        for key in ("loop_control", "ansible.builtin.loop_control"):
+            block = task.get(key)
+            if isinstance(block, dict) and isinstance(block.get("loop_var"), str):
+                bound.add(block["loop_var"])
+    return bound
+
+
+def _role_defined_names() -> set[str]:
+    """Every variable any role in the repo defines.
+
+    A variable with a role default is already defined at runtime. Writing it
+    into group_vars/all does not fix a failure — group_vars outranks role
+    defaults, so it *overrides* a working value with a fabricated one.
+    """
+    names: set[str] = set()
+    for base in (repo_root() / "ansible" / "roles", repo_root() / "roles"):
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.yml"):
+            parts = set(path.parts)
+            if not ({"defaults", "vars"} & parts):
+                continue
+            try:
+                data = _load_yaml(path)
+            except InputUnreadable:
+                continue
+            names.update(str(k) for k in data)
+    return names
+
+
 def _collect_template_vars(task: dict) -> list[str]:
     """Every ``{{ var }}`` reference anywhere in the task.
 
@@ -614,6 +698,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     inv = _load_yaml(inventory_path())
     group_vars = _load_group_vars()
     narrow_vars = _load_narrow_vars()
+    role_names = _role_defined_names()
     playbook = _expand_playbook(playbook_path)
 
     log_lines: list[str] = []
@@ -633,6 +718,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
         play_source = play.get("_source_playbook", str(playbook_path.relative_to(repo_root())))
         tasks = _plays_tasks(play, play_source)
         play_vars = play.get("vars") if isinstance(play.get("vars"), dict) else {}
+        bound_here = _names_bound_by_play(play) | role_names
 
         for task in tasks:
             task_name = task.get("name", "<unnamed task>")
@@ -672,7 +758,8 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
             # agent committed a fabricated default for it into group_vars —
             # silently overriding a value the operator had chosen.
             refs = _collect_template_vars(task)
-            undefined = [r for r in refs if r not in defined]
+            undefined = [r for r in refs
+                         if r not in defined and r not in bound_here]
             if undefined:
                 var = undefined[0]
                 play_hosts = _hosts_in_inventory(inv, target) or []

@@ -803,3 +803,244 @@ def test_ansible_core_is_consulted_before_an_inventory_is_edited(repo, monkeypat
 
     assert diag["fix"]["action"] == "none"
     assert "ansible-core resolves" in diag["_no_fix_reason"]
+
+
+# ── the corroboration gate itself ───────────────────────────────────
+
+def test_the_gate_uses_ansibles_own_inventory_resolution(repo):
+    """The gate must ask about the inventory ansible-core would actually use.
+
+    It used to hand `ansible` the agent's own guess via `-i`, which overrides
+    everything real Ansible would have consulted. On a repo whose ansible.cfg
+    lists two inventory files the probe was shown one of them, answered "no
+    such host" truthfully, and a live host in the other file was renamed away.
+    """
+    (repo / "ansible.cfg").write_text(
+        "[defaults]\ninventory = ansible/inv_a.yml,ansible/inv_b.yml\n")
+    _write(repo, "ansible/inv_a.yml", """
+        all:
+          hosts:
+            web-01: {ansible_host: 10.0.0.1}
+    """)
+    _write(repo, "ansible/inv_b.yml", """
+        all:
+          hosts:
+            web-02: {ansible_host: 10.0.0.2}
+    """)
+    (repo / "ansible" / "inventory.yml").unlink()
+    _write(repo, "ansible/playbooks/site.yml", _play("web-02"))
+    before = (repo / "ansible" / "inv_a.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert (repo / "ansible" / "inv_a.yml").read_text() == before
+    assert any("ansible-core resolves" in d for d in result.declined), result.declined
+
+
+def test_the_gate_never_fails_open(monkeypatch):
+    """A probe that cannot answer must return None, not False.
+
+    False means "ansible says this pattern matches nothing", which authorises
+    the rename. Collapsing "the probe did not run" into that would let any
+    environment problem re-open every hole the gate exists to close.
+    """
+    from agent import diagnoser
+
+    monkeypatch.setattr(diagnoser.shutil, "which", lambda _: None)
+    assert diagnoser.ansible_resolves("web-01") is None
+
+    monkeypatch.setattr(diagnoser.shutil, "which", lambda _: "/usr/bin/ansible")
+    monkeypatch.setattr(diagnoser.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    assert diagnoser.ansible_resolves("web-01") is None
+
+
+def test_a_pattern_that_looks_like_a_flag_is_not_probed(monkeypatch):
+    """`ansible -foo --list-hosts` is a usage error, which read as "cannot
+    answer" — one more free fail-open."""
+    from agent import diagnoser
+    monkeypatch.setattr(diagnoser.shutil, "which", lambda _: "/usr/bin/ansible")
+    assert diagnoser.ansible_resolves("--become") is None
+
+
+def test_an_llm_rename_goes_through_the_same_guards(repo, monkeypatch):
+    """The guards lived inside fallback_diagnose only, and the LLM is the
+    default path. The prompt template asks the model, in as many words, to
+    "rename the host in the inventory to the name the playbook targets" — the
+    exact destructive act every guard exists to prevent — and nothing between
+    the model and the patcher looked at Ansible semantics at all.
+    """
+    from agent import diagnoser
+
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            canary:
+              hosts: {}
+            webservers:
+              hosts:
+                canary-01: {}
+    """)
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "stale host",
+        "failure_type": "unreachable_host",
+        "fix": {"action": "rename_host", "target_file": "ansible/inventory.yml",
+                "old": "canary-01", "new": "canary", "rationale": "rename"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "unreachable_host", "pattern": "canary", "host": "canary",
+         "raw_pattern": "canary"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", diag["fix"]
+    assert "is a group" in diag["_no_fix_reason"]
+
+
+def test_an_llm_rename_onto_an_existing_host_is_refused(repo, monkeypatch):
+    from agent import diagnoser
+
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "stale host",
+        "failure_type": "unreachable_host",
+        "fix": {"action": "rename_host", "target_file": "ansible/inventory.yml",
+                "old": "web-01", "new": "web-02", "rationale": "rename"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "unreachable_host", "pattern": "web-99", "host": "web-99",
+         "raw_pattern": "web-99"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", diag["fix"]
+    assert "already a host" in diag["_no_fix_reason"]
+
+
+def test_rename_host_refuses_to_merge_two_hosts(repo):
+    """The rebuild is assignment-based and order-preserving, so renaming onto
+    an existing key produced a mapping with one entry: two hosts in, one out,
+    no error."""
+    from agent import yaml_edit
+    inventory = (repo / "ansible" / "inventory.yml").read_text()
+    with pytest.raises(yaml_edit.YamlEditError) as exc:
+        yaml_edit.rename_host(inventory, "web-01", "web-02")
+    assert "already a host" in str(exc.value)
+
+
+def test_the_gate_does_not_run_repository_supplied_inventory_code(repo):
+    """`--dry-run` is documented as the mode to point at a repo you have not
+    decided to trust. The probe runs ansible with cwd set to that repo, so its
+    ansible.cfg could load a third-party inventory plugin — executable code
+    from the repository under audit — during a mode that promises to write
+    nothing."""
+    marker = repo / "EXECUTED"
+    (repo / "ansible.cfg").write_text(
+        "[defaults]\ninventory_plugins = ./invp\n"
+        "[inventory]\nenable_plugins = evilinv, yaml, ini, auto\n")
+    plugin = repo / "invp" / "evilinv.py"
+    plugin.parent.mkdir(parents=True, exist_ok=True)
+    plugin.write_text(
+        "from ansible.plugins.inventory import BaseInventoryPlugin\n"
+        "DOCUMENTATION = 'name: evilinv\\noptions: {}\\n'\n"
+        "class InventoryModule(BaseInventoryPlugin):\n"
+        "    NAME = 'evilinv'\n"
+        "    def verify_file(self, path):\n"
+        f"        open({str(marker)!r}, 'w').write('x')\n"
+        "        return False\n")
+    _write(repo, "ansible/playbooks/site.yml", _play("web-99"))
+
+    from agent import diagnoser
+    diagnoser.ansible_resolves("web-99")
+
+    assert not marker.exists(), "ran code supplied by the repository under audit"
+
+
+# ── variables Ansible supplies for itself ───────────────────────────
+
+def test_a_role_default_is_not_overwritten_with_a_global(repo):
+    """group_vars/all outranks a role default, so writing one there does not
+    fix a failure — it overrides a working value with a fabricated one. A repo
+    deploying /srv/app-1.4.2 quietly started deploying /srv/app-."""
+    _write(repo, "ansible/roles/app/defaults/main.yml", 'app_version: "1.4.2"\n')
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: use
+              ansible.builtin.debug:
+                msg: "deploying /srv/app-{{ app_version }}"
+    """)
+    before = (repo / "ansible" / "group_vars" / "all.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert result.success, result.declined
+    assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
+
+
+@pytest.mark.parametrize("name,task_block", [
+    ("loop item", '''
+        - name: loop
+          ansible.builtin.debug:
+            msg: "{{ item }}"
+          loop: [a, b]
+    '''),
+    ("set_fact", '''
+        - name: fact
+          ansible.builtin.set_fact:
+            computed_value: 42
+        - name: use
+          ansible.builtin.debug:
+            msg: "{{ computed_value }}"
+    '''),
+    ("register", '''
+        - name: run
+          ansible.builtin.command: echo hi
+          register: cmd_out
+        - name: use
+          ansible.builtin.debug:
+            msg: "{{ cmd_out }}"
+    '''),
+])
+def test_variables_ansible_binds_itself_are_not_reported_undefined(
+        repo, name, task_block):
+    """The whole-task scan treats every `{{ x }}` as needing a group_vars entry.
+    `item`, a registered result and a set_fact key are the three most common
+    idioms in Ansible, and each produced a junk commit writing an empty global.
+    """
+    body = textwrap.dedent("""
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+    """).lstrip("\n") + textwrap.dedent(task_block)
+    (repo / "ansible" / "playbooks" / "site.yml").write_text(body)
+    before = (repo / "ansible" / "group_vars" / "all.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert result.success, result.declined
+    assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before, name
+
+
+def test_a_top_level_yaml_inventory_resolves(repo):
+    """Top-level keys ARE groups when there is no `all:`. This is the standard
+    documented layout, and the rule for the *other* shape (a mapping under
+    `all:`, which ansible-core skips) was being applied to it — so every
+    pattern in such a repo resolved to zero hosts."""
+    _write(repo, "ansible/inventory.yml", """
+        webservers:
+          hosts:
+            web-01: {}
+            web-02: {}
+        dbservers:
+          hosts:
+            db-01: {}
+        prod:
+          children:
+            webservers: {}
+            dbservers: {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", _play("prod"))
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+    assert sorted(result.succeeded_hosts) == ["db-01", "web-01", "web-02"]

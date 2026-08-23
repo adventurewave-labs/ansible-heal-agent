@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -88,6 +89,18 @@ def set_output_root(path: str | Path | None) -> Path | None:
     return _OUTPUT_ROOT
 
 
+def _artefact_base() -> Path:
+    """Where artefacts go. Never inside a bare git directory.
+
+    A bare repo has no work tree, so writing `pipeline/runs/` into it litters
+    the git directory itself alongside `objects/` and `refs/`.
+    """
+    root = output_root()
+    if _OUTPUT_ROOT is None and (root / "HEAD").is_file() and not (root / ".git").exists():
+        return Path(tempfile.gettempdir()) / f"ansible-heal-{root.name}"
+    return root
+
+
 def output_root_override() -> Path | None:
     """The explicit artefact root, if one is set. ``None`` means "the repo"."""
     return _OUTPUT_ROOT
@@ -100,13 +113,13 @@ def output_root() -> Path:
 
 def runs_dir() -> Path:
     """Directory pipeline run logs are written to (created on demand)."""
-    d = output_root() / "pipeline" / "runs"
+    d = _artefact_base() / "pipeline" / "runs"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def transcripts_dir() -> Path:
-    d = output_root() / "transcripts"
+    d = _artefact_base() / "transcripts"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
