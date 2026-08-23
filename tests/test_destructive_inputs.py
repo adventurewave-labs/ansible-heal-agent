@@ -100,7 +100,7 @@ def repo(scratch_repo: Path) -> Path:
     return scratch_repo
 
 
-# ── secrets ─────────────────────────────────────────────────────────
+# ── secrets ──────────────────────────────────────────────────────
 
 VAULT = ("$ANSIBLE_VAULT;1.1;AES256\n"
          "37623433383166326566396633383864613463396264616238\n"
@@ -152,7 +152,7 @@ def test_a_hardlinked_target_is_refused(repo, tmp_path):
     assert outside.read_text() == "secret: original\n"
 
 
-# ── the operator's git state ────────────────────────────────────────
+# ── the operator's git state ───────────────────────────────────────
 
 def test_a_merge_in_progress_is_never_concluded_by_the_agent(repo):
     """The agent used to `git add` + `git commit` straight through a conflicted
@@ -212,7 +212,7 @@ def test_a_commit_git_refuses_is_reported_not_counted(repo):
         assert "" not in record.commits, "recorded a phantom empty SHA"
 
 
-# ── host patterns that are not stale hostnames ──────────────────────
+# ── host patterns that are not stale hostnames ────────────────────────
 
 def test_a_group_pattern_never_renames_a_host(repo):
     """An empty group — a tier scaled to zero, a dynamic-inventory placeholder
@@ -335,7 +335,7 @@ def test_a_variable_named_hosts_does_not_invent_a_group(repo):
     assert sorted(result.succeeded_hosts) == ["web-01", "web-02"]
 
 
-# ── variables the operator has already defined ──────────────────────
+# ── variables the operator has already defined ────────────────────────
 
 def test_a_group_var_covering_every_targeted_host_is_simply_defined(repo):
     """`group_vars/webservers.yml` covers web-01, and the play targets web-01.
@@ -482,7 +482,7 @@ def test_a_glob_matches_group_names_too(repo):
     assert sorted(result.succeeded_hosts) == ["alpha", "beta"]
 
 
-# ── the operator's other files ──────────────────────────────────────
+# ── the operator's other files ─────────────────────────────────────
 
 def test_a_worktree_is_recognised_as_a_repository(repo, tmp_path):
     """In a worktree — and in a submodule — `.git` is a *file*, not a directory.
@@ -537,7 +537,7 @@ def test_initialising_a_directory_does_not_commit_what_was_already_there(
     assert ".env" not in committed, "committed a file it was never asked to touch"
 
 
-# ── inputs that used to raise ───────────────────────────────────────
+# ── inputs that used to raise ──────────────────────────────────────
 
 @pytest.mark.parametrize("name,playbook,expect", [
     ("import cycle", "- import_playbook: site.yml\n", "cycle"),
@@ -638,7 +638,7 @@ def test_the_words_vault_in_a_comment_do_not_block_a_patch(repo):
     assert result.success, result.declined
 
 
-# ── the operator's other work in the same repository ────────────────
+# ── the operator's other work in the same repository ────────────────────
 
 def test_a_subdirectory_target_does_not_sweep_the_parent_index(tmp_path, monkeypatch):
     """`git commit` with no pathspec commits the WHOLE index.
@@ -705,7 +705,7 @@ def test_a_bare_repository_is_recognised(tmp_path):
     assert (check / "prod.txt").is_file(), "history was masked"
 
 
-# ── patterns, once more ─────────────────────────────────────────────
+# ── patterns, once more ───────────────────────────────────────────
 
 def test_an_ipv6_literal_with_an_ipv4_tail_is_treated_as_ambiguous(repo):
     """`fd00::21:10.0.0.5` is BOTH a valid IPv6 literal and a union of two
@@ -831,7 +831,7 @@ def test_ansible_core_is_consulted_before_an_inventory_is_edited(repo, monkeypat
     assert "ansible-core resolves" in diag["_no_fix_reason"]
 
 
-# ── the corroboration gate itself ───────────────────────────────────
+# ── the corroboration gate itself ──────────────────────────────────
 
 def test_the_gate_uses_ansibles_own_inventory_resolution(repo):
     """The gate must ask about the inventory ansible-core would actually use.
@@ -860,7 +860,8 @@ def test_the_gate_uses_ansibles_own_inventory_resolution(repo):
     result = heal(max_retries=3, use_llm=False)
 
     assert (repo / "ansible" / "inv_a.yml").read_text() == before
-    assert any("ansible-core resolves" in d for d in result.declined), result.declined
+    assert not result.success
+    assert any("ansible-core" in d for d in result.declined), result.declined
 
 
 def test_the_gate_never_fails_open(monkeypatch):
@@ -979,7 +980,7 @@ def test_the_gate_does_not_run_repository_supplied_inventory_code(repo):
     assert not marker.exists(), "ran code supplied by the repository under audit"
 
 
-# ── variables Ansible supplies for itself ───────────────────────────
+# ── variables Ansible supplies for itself ────────────────────────────
 
 def test_a_role_default_is_not_overwritten_with_a_global(repo):
     """group_vars/all outranks a role default, so writing one there does not
@@ -1072,15 +1073,17 @@ def test_a_top_level_yaml_inventory_resolves(repo):
     assert sorted(result.succeeded_hosts) == ["db-01", "web-01", "web-02"]
 
 
-# ── what the agent cannot see ───────────────────────────────────────
+# ── what the agent cannot see ──────────────────────────────────────
 
 def test_a_dynamic_inventory_source_stops_every_rename(repo):
-    """The probe deliberately runs without the script, auto and constructed
-    plugins — those execute code the target repo supplies. So a repo using one
-    shows the probe fewer hosts than a real run has, and `hosts (0)` from a
-    partial view is not evidence a host is absent. A live host defined in a
-    static file, alongside a dynamic source, was renamed away on that basis and
-    the run reported success.
+    """A repo whose inventory the agent cannot fully see keeps its hosts.
+
+    The host set comes from `ansible-inventory --list` now, not from this
+    agent's reading of one file. In dry-run the repo's own inventory plugins
+    stay disabled, so a dynamic source makes the answer unavailable — and an
+    unavailable answer refuses the rename rather than authorising it. A live
+    host in a static file, alongside a dynamic source, used to be renamed away
+    on a partial view while the run reported success.
     """
     (repo / "ansible.cfg").write_text(
         "[defaults]\ninventory = ansible/inventory.yml,ansible/inv/dynamic.py\n")
@@ -1094,7 +1097,8 @@ def test_a_dynamic_inventory_source_stops_every_rename(repo):
     result = heal(max_retries=3, use_llm=False)
 
     assert (repo / "ansible" / "inventory.yml").read_text() == before
-    assert any("cannot read safely" in d for d in result.declined), result.declined
+    assert not result.success
+    assert result.declined, "a refusal must be reported, not silence"
 
 
 def test_an_unparsed_inventory_is_not_a_missing_host(repo, monkeypatch):
@@ -1109,7 +1113,7 @@ def test_an_unparsed_inventory_is_not_a_missing_host(repo, monkeypatch):
         assert diagnoser.ansible_resolves("db-primary-01") is None
 
 
-# ── variables the agent cannot see ──────────────────────────────────
+# ── variables the agent cannot see ─────────────────────────────────
 
 def test_a_variable_set_in_the_inventory_is_not_undefined(repo):
     """Inventory `vars:` sit BELOW group_vars/all in Ansible's precedence, so
@@ -1161,7 +1165,7 @@ def test_a_variable_from_vars_files_is_not_undefined(repo):
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
 
 
-# ── fix shapes the guard has to understand ──────────────────────────
+# ── fix shapes the guard has to understand ───────────────────────────
 
 def test_an_llm_edit_file_on_the_inventory_is_refused(repo, monkeypatch):
     """PROMPT_TEMPLATE asks the model for `edit_file` with search/replace, and
@@ -1190,13 +1194,11 @@ def test_an_llm_edit_file_on_the_inventory_is_refused(repo, monkeypatch):
 @pytest.mark.parametrize("spelling", [
     "./ansible/inventory.yml",
     "ansible//inventory.yml",
-    "ansible/inventory/staging.yml",
-    "ansible/hosts.yml",
+    "ansible/./inventory.yml",
 ])
 def test_an_inventory_by_another_spelling_is_still_guarded(repo, monkeypatch, spelling):
-    """The check was `target == _inventory_rel() or endswith("inventory.yml")`,
-    so a path the patcher normalises but that string comparison misses skipped
-    every remaining guard."""
+    """A path the patcher normalises but a string comparison misses used to
+    skip every remaining guard."""
     from agent import diagnoser
 
     monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
@@ -1212,7 +1214,41 @@ def test_an_inventory_by_another_spelling_is_still_guarded(repo, monkeypatch, sp
     assert diag["fix"]["action"] == "none", (spelling, diag["fix"])
 
 
-# ── the operator's own edits ────────────────────────────────────────
+# ── the operator's own edits ─────────────────────────────────────
+
+def test_a_second_configured_inventory_is_guarded_too(repo, monkeypatch):
+    """An inventory is what ansible.cfg says it is, not what its filename looks
+    like. The check consulted only the first source, so an edit_file fix
+    targeting the second sailed through unguarded and a replace span deleted
+    two live hosts."""
+    from agent import diagnoser
+
+    (repo / "ansible.cfg").write_text(
+        "[defaults]\ninventory = ansible/prod.yml,ansible/staging.yml\n")
+    _write(repo, "ansible/prod.yml", "all:\n  hosts:\n    web-01: {}\n")
+    _write(repo, "ansible/staging.yml", "all:\n  hosts:\n    stg-01: {}\n")
+
+    monkeypatch.setattr(diagnoser, "llm_diagnose", lambda failure: {
+        "diagnosis": "stale", "failure_type": "unreachable_host",
+        "fix": {"action": "edit_file", "target_file": "ansible/staging.yml",
+                "search": "stg-01:", "replace": "web-server-01:", "rationale": "r"},
+    })
+
+    diag = diagnoser.diagnose(
+        {"type": "unreachable_host", "pattern": "web-server-01",
+         "host": "web-server-01", "raw_pattern": "web-server-01"}, use_llm=True)
+
+    assert diag["fix"]["action"] == "none", diag["fix"]
+
+
+def test_a_playbook_named_like_an_inventory_is_not_treated_as_one(repo, monkeypatch):
+    """`playbooks/bastion-hosts.yml` was refused because its name contains
+    "hosts", and `inventories/prod/group_vars/all.yml` because a path component
+    contains "inventories" — both legitimate fixes, both blocked by substring."""
+    from agent import diagnoser
+    assert not diagnoser._is_inventory_target("ansible/playbooks/bastion-hosts.yml")
+    assert not diagnoser._is_inventory_target("inventories/prod/group_vars/all.yml")
+
 
 def test_the_operators_uncommitted_work_is_never_committed(repo):
     """`git commit -- <path>` commits the WORKING TREE state of that path. The
@@ -1264,3 +1300,77 @@ def test_the_module_probe_reads_the_payload_not_the_exit_code(repo):
     assert diagnoser.module_resolves("apt_key") is True
     assert diagnoser.module_resolves("docker") is False
     assert diagnoser.module_resolves("totally_made_up_xyz") is False
+
+
+# ── the agent's own preconditions ─────────────────────────────────
+
+def test_the_writing_modes_refuse_without_ansible_core(repo, monkeypatch):
+    """Every check that stops the agent damaging a working repository — does
+    this host exist, does this module resolve — is answered by ansible-core.
+    Without it they all return "unknown", and the modes that write would run
+    with no authority behind any of their decisions. `pip install` used to
+    produce exactly that: an install whose guards were all inert."""
+    import agent.core as core
+
+    _write(repo, "ansible/playbooks/site.yml", _needs_var())
+    monkeypatch.setattr(core.shutil, "which",
+                        lambda name: None if name.startswith("ansible") else "/bin/true")
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert not result.success
+    assert any("not found on PATH" in d for d in result.declined), result.declined
+    assert result.history == [] or not any(r.commits for r in result.history)
+
+
+def test_a_rename_that_would_orphan_host_vars_is_refused(repo):
+    """host_vars/<host>.yml is keyed by name. Renaming the host leaves the file
+    behind, silently detaching every variable it defined — connection details
+    included — and breaking plays that were working."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          hosts:
+            web-01: {}
+    """)
+    _write(repo, "ansible/host_vars/web-01.yml",
+           "ansible_connection: local\nnginx_port: 9090\n")
+    _write(repo, "ansible/playbooks/site.yml", _play("web-server-01"))
+    before = (repo / "ansible" / "inventory.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert (repo / "ansible" / "inventory.yml").read_text() == before
+    assert any("orphan" in d for d in result.declined), result.declined
+
+
+def test_a_file_the_operator_is_editing_is_not_written_to(repo):
+    """The refusal used to fire at commit time, by which point the operator's
+    work-in-progress had already been overwritten by the agent's edit — and the
+    message told them to stash, which would have discarded both together."""
+    _write(repo, "ansible/playbooks/site.yml", _needs_var())
+    marker = "---\nenv: prod\nsecret_debug: true   # WIP, do not ship\n"
+    (repo / "ansible" / "group_vars" / "all.yml").write_text(marker)
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == marker, \
+        "the agent wrote over work it then refused to commit"
+    assert any("in the middle of" in d for d in result.declined), result.declined
+
+
+def test_a_variable_in_a_group_vars_all_directory_is_seen(repo):
+    """`group_vars/all/` may hold any number of files, not just main.yml. Only
+    main.yml was read, so a variable in ports.yml was reported undefined
+    forever on a repo ansible-playbook exits 0 on."""
+    _write(repo, "ansible/group_vars/all/ports.yml", "app_version: 1.4.2\n")
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: "deploying /srv/app-{{ app_version }}"
+    """)
+    result = heal(max_retries=3, use_llm=False)
+    assert result.success, result.declined
