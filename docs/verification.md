@@ -1,6 +1,6 @@
 # Verification report
 
-**Date:** 2026-08-22
+**Date:** 2026-08-23
 **Commit under test:** the tip of this branch
 **Method:** fresh clone, `make install`, commands run as shown and their real
 output pasted back. Every number below was measured on the run that produced
@@ -21,14 +21,14 @@ $ ruff check .
 All checks passed!
 
 $ python3 -m pytest -q
-174 passed
+194 passed
 
 $ python3 -m pytest -q --cov=agent --cov=pipeline
-TOTAL  1586  255  568  107  81%
+TOTAL  1843  303  682  126  81%
 ```
 
 That is the command CI runs, and the one its `--cov-fail-under=78` gate applies
-to. Adding `--cov=scenarios` gives `TOTAL 1623 270 582 110 80%` — the previous
+to. Adding `--cov=scenarios` gives `TOTAL 1880 318 696 129 80%` — the previous
 version of this file printed the two-package totals under the three-package
 command, which is exactly the kind of thing this document exists to catch.
 
@@ -37,15 +37,15 @@ command, which is exactly the kind of thing this document exists to catch.
 | `agent/config.py` | 98% |
 | `agent/llm.py` | 97% |
 | `agent/pipeline_restarter.py` | 90% |
-| `pipeline/runner.py` | 89% |
-| `agent/committer.py` | 88% |
-| `agent/yaml_edit.py` | 83% |
+| `pipeline/runner.py` | 90% |
+| `agent/committer.py` | 90% |
+| `agent/yaml_edit.py` | 81% |
 | `agent/cli.py` | 81% |
 | `agent/log_scanner.py` | 81% |
-| `agent/patcher.py` | 80% |
-| `agent/core.py` | 70% |
+| `agent/patcher.py` | 83% |
+| `agent/core.py` | 69% |
 | `agent/diagnoser.py` | 67% |
-| `pipeline/git_helper.py` | 67% |
+| `pipeline/git_helper.py` | 76% |
 
 The three lowest are named deliberately rather than omitted: `core.py`'s
 uncovered lines are mostly `Transcript` formatting, `git_helper.py` is the
@@ -80,7 +80,15 @@ The program output itself is real and unedited.
 ## Generalisation
 
 The single most important result, because the previous implementation could not
-do it. `tests/test_runner_inputs.py` is the counterpart to this section: nine cases for
+do it. `tests/test_destructive_inputs.py` is the most important file in the suite:
+thirteen repositories the agent must not damage. Every one is a case where an
+earlier version made a confident, committed change that destroyed something —
+a vault-encrypted secrets file rewritten as plaintext, a production host
+renamed out of the inventory to match a group name, an operator's half-finished
+merge concluded under a commit subject about something else. The required
+behaviour in all thirteen is identical: refuse, say why, change nothing.
+
+`tests/test_runner_inputs.py` is the counterpart to this section: sixteen cases for
 repositories that are *not* the seeded baseline — comma-separated and
 list-valued `hosts:`, flat inventory groups, absent group_vars, unparseable
 playbooks, a missing imported playbook, an unsupported pattern, and a variable
@@ -153,6 +161,13 @@ Asserted as properties, not by inspection:
   unborn HEAD and losing the base branch
 - a host pattern the simulator cannot evaluate is reported as such, not as a
   missing host, so the diagnoser never "fixes" a repository that was green
+- ansible-vault encrypted files are never read or rewritten, and a hardlinked
+  target is refused — the write surface cannot bound where those bytes land
+- patches are written atomically, so a failed write cannot truncate the original
+- the agent refuses to commit into a repository that is mid-merge, mid-rebase or
+  on a detached HEAD, and reports a commit git refuses rather than counting it
+- apply and PR modes hold an exclusive lock on the target repo: 6/6 paired
+  concurrent runs left nothing staged, against 9/12 that stranded work before
 - the test suite leaves `git status --porcelain` empty — enforced in CI
 
 ## Known gaps
