@@ -127,14 +127,14 @@ executable code that repository supplies.
 
 This is the single most important line of defence in the project, and it exists
 because of a shape that repeated across six audit rounds: the simulator failed
-to match some ordinary Ansible construct — IPv6 literals, `?` globs,
-whitespace separators, nested groups, exclusion, intersection — and the
-diagnoser read "no match" as "the inventory is wrong" and renamed a live host.
-Each of those was fixed individually and each fix left a neighbouring case
-broken. Patching a reimplementation of Ansible's pattern language toward
-correctness does not converge; asking the real thing does. Where ansible-core
-is not installed the guards below still apply, but the pipeline result is a
-simulation and the README says so.
+to match some ordinary Ansible construct — IPv6 literals, `?` globs, whitespace
+separators, nested groups, exclusion, intersection — and the diagnoser read "no
+match" as "the inventory is wrong" and renamed a live host. Each of those was
+fixed individually and each fix left a neighbouring case broken. Patching a
+reimplementation of Ansible's pattern language toward correctness does not
+converge; asking the real thing does. Where ansible-core is not installed the
+guards below still apply, but the pipeline result is a simulation and the
+README says so.
 
 **What the simulator is not.** `pipeline/runner.py` is a simulator, and the
 gap between it and ansible-core is where nearly every destructive bug in this
