@@ -170,7 +170,7 @@ def _assert_healed(repo: Path, variable: str, stale: str, expected: str,
     assert exit_code == (0 if module_converges else 2)
 
 
-# ── one dimension at a time ─────────────────────────────────────
+# ── one dimension at a time ──────────────────────────────────────────
 
 @pytest.mark.parametrize("variable", VARIABLES)
 def test_heals_any_undefined_variable_name(scratch_repo, variable):
@@ -194,7 +194,7 @@ def test_heals_any_known_removed_module(scratch_repo, module):
     _assert_healed(scratch_repo, "nginx_port", "web-01", "web-server-01", module)
 
 
-# ── all three varied together ───────────────────────────────────
+# ── all three varied together ────────────────────────────────────────
 
 COMBINATIONS = list(itertools.islice(
     zip(itertools.cycle(VARIABLES),
@@ -212,7 +212,7 @@ def test_heals_combined_perturbations(scratch_repo, variable, hosts, module):
     _assert_healed(scratch_repo, variable, stale, expected, module)
 
 
-# ── inferred values ────────────────────────────────────────
+# ── inferred values ────────────────────────────────────────────────
 
 @pytest.mark.parametrize("variable,expected_value", [
     ("nginx_port", 8080),
@@ -230,7 +230,7 @@ def test_inferred_defaults_are_conservative(scratch_repo, variable,
     assert yaml_edit.infer_default(variable) == expected_value
 
 
-# ── honest refusals ────────────────────────────────────────
+# ── honest refusals ────────────────────────────────────────────────
 
 def test_refuses_to_rename_an_unrelated_host(scratch_repo):
     """No close match means no fix — not a coin flip on someone's inventory."""
