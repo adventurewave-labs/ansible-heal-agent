@@ -637,6 +637,7 @@ def test_a_subdirectory_target_does_not_sweep_the_parent_index(tmp_path, monkeyp
         path.write_text(body)
     _git(root, "add", "-A")
     _git(root, "commit", "-m", "initial")
+
     (root / "app" / "secrets.py").write_text("PASSWORD=work-in-progress\n")
     _git(root, "add", "app/secrets.py")
 
