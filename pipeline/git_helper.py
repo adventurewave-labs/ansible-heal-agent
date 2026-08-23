@@ -144,6 +144,26 @@ def is_detached() -> bool:
     return _git("symbolic-ref", "--quiet", "HEAD").returncode != 0
 
 
+#: Paths already modified in the working tree when the run started.
+_PREEXISTING_DIRTY: set[str] = set()
+
+
+def snapshot_dirty() -> None:
+    """Record the working tree's modified paths before the agent edits anything."""
+    global _PREEXISTING_DIRTY
+    proc = _git("status", "--porcelain")
+    paths: set[str] = set()
+    for line in proc.stdout.splitlines():
+        if len(line) > 3:
+            paths.add(line[3:].strip().split(" -> ")[-1])
+    _PREEXISTING_DIRTY = paths
+
+
+def was_dirty(path: str | Path) -> bool:
+    """True if ``path`` already had uncommitted changes when the run started."""
+    return str(path) in _PREEXISTING_DIRTY
+
+
 def add(path: str | Path) -> None:
     _git("add", str(path))
 

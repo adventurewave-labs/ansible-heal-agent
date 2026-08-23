@@ -20,9 +20,24 @@ def commit_fix(fix: dict[str, Any], diagnosis: dict[str, Any]) -> str:
     # declared path's own blob is unchanged and git had nothing to commit —
     # leaving the agent's edit sitting in the working tree, uncommitted.
     staged = _resolved_target(target)
+    # `git commit -- <path>` commits the WORKING TREE state of that path, not
+    # what the agent staged. If the operator had their own uncommitted edits in
+    # the same file, those went into a commit titled as an automated fix — in
+    # one case a staging bump the operator had marked "do not ship".
+    dirty = git_helper.was_dirty(staged)
+    if dirty:
+        raise git_helper.GitStateError(
+            f"{staged} had uncommitted changes before the agent edited it; "
+            f"committing now would include them under this fix's subject. "
+            f"Commit or stash them and re-run")
     git_helper.add(staged)
     msg = _build_message(fix, diagnosis)
     return git_helper.commit(msg, pathspec=staged)
+
+
+def note_preexisting_changes() -> None:
+    """Record which files were already modified, before the agent touches any."""
+    git_helper.snapshot_dirty()
 
 
 def _resolved_target(target: str) -> str:
