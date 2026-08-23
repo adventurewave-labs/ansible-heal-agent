@@ -18,7 +18,7 @@ def _site(repo: Path) -> Path:
     return repo / "ansible" / "playbooks" / "site.yml"
 
 
-# ── mock runner ───────────────────────────────────────────────────────
+# ── mock runner ───────────────────────────────────────────
 
 def test_baseline_fails_with_three_failures(scratch_repo):
     result = runner.run_pipeline(_site(scratch_repo))
@@ -47,15 +47,24 @@ def test_runner_goes_green_once_baseline_is_fixed(scratch_repo):
     gv = scratch_repo / "ansible" / "group_vars" / "all.yml"
     gv.write_text(gv.read_text() + "\nnginx_port: 8080\n")
     web = scratch_repo / "ansible" / "playbooks" / "webservers.yml"
+    # community.docker.docker_container is the real migration target, but it
+    # lives in a collection this environment does not install — and the
+    # runner now asks ansible-doc about every module a task uses, not a
+    # hardcoded pair of names, so that name alone would still be reported
+    # broken here (see
+    # test_the_mock_pipeline_does_not_report_a_false_green_after_an_unresolvable_swap
+    # in test_destructive_inputs.py). Any module ansible-doc genuinely
+    # resolves demonstrates the same thing this test checks: the runner
+    # reports green once every input is actually fixed.
     web.write_text(web.read_text().replace(
-        "ansible.builtin.docker:", "community.docker.docker_container:"))
+        "ansible.builtin.docker:", "ansible.builtin.debug:"))
 
     result = runner.run_pipeline(_site(scratch_repo))
     assert result.exit_code == 0, result.failures
     assert result.failures == []
 
 
-# ── diagnoser ───────────────────────────────────────────────────────
+# ── diagnoser ───────────────────────────────────────────
 
 def test_fallback_diagnoser_hostname_change(scratch_repo):
     diag = diagnoser.fallback_diagnose(
@@ -105,7 +114,7 @@ def test_unknown_failure_type_yields_no_op_fix(scratch_repo):
     assert diag["fix"]["action"] == "none"
 
 
-# ── patcher ────────────────────────────────────────────────────────
+# ── patcher ───────────────────────────────────────────
 
 def test_patcher_applies_hostname_rename(scratch_repo):
     diag = diagnoser.fallback_diagnose(
@@ -147,26 +156,39 @@ def test_patcher_rejects_invalid_yaml_and_does_not_write(scratch_repo):
     assert inv.read_text() == before
 
 
-# ── heal loop ──────────────────────────────────────────────────────
+# ── heal loop ───────────────────────────────────────────
 
 def test_full_heal_loop_with_fallback(scratch_repo, git_log_count):
+    """The seeded baseline has three failure classes. The host rename and the
+    undefined variable both resolve cleanly. The module class does not: its
+    replacement, `community.docker.docker_container`, lives in a collection
+    this environment does not install, so the mock pipeline — now honestly
+    checking every module against ansible-doc rather than a fixed two-name
+    dict — correctly keeps reporting it broken after the swap, matching what
+    `ansible-playbook` itself would say (see test_real_ansible.py). The loop
+    still makes all three fixes, one commit each; it does not claim success
+    over the one it cannot actually verify."""
     from agent.core import heal
     before = git_log_count()
     result = heal(playbook="ansible/playbooks/site.yml", max_retries=3,
                   use_llm=False, transcript=None)
-    assert result.success, f"heal failed: exit={result.final_exit_code}"
+    assert not result.success
+    assert any("would change nothing" in d for d in result.declined), result.declined
     assert git_log_count() == before + 3, "expected exactly one commit per fix"
 
 
 def test_heal_on_green_repo_is_a_no_op(scratch_repo, git_log_count):
+    """A second run makes no further commits: the module class still cannot
+    resolve without a collection this environment does not install, and the
+    patcher's own no-op guard refuses to re-propose the identical swap."""
     from agent.core import heal
     heal(playbook="ansible/playbooks/site.yml", max_retries=3, use_llm=False)
     after_first = git_log_count()
 
     result = heal(playbook="ansible/playbooks/site.yml", max_retries=3, use_llm=False)
-    assert result.success
+    assert not result.success
     assert result.iterations == 0
-    assert git_log_count() == after_first, "idempotent re-run must not commit"
+    assert git_log_count() == after_first, "must not commit a no-op fix twice"
 
 
 def test_heal_leaves_developer_checkout_untouched(scratch_repo):
