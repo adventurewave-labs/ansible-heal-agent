@@ -28,6 +28,9 @@ Three gates run before anything is written, in this order:
 from __future__ import annotations
 
 import difflib
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +48,34 @@ class PathNotAllowed(PatchError):
     """Raised when a fix targets a file outside the configured write surface."""
 
 
+#: First line of an ansible-vault file. The ciphertext that follows is a valid
+#: YAML *scalar*, so a YAML-validity check alone happily passes it — and a
+#: string-replace edit will then write plaintext over an operator's secrets and
+#: commit the result. There is no version of "patch it anyway" that is correct
+#: here: the agent has no vault password and no business having one.
+_VAULT_HEADER = "$ANSIBLE_VAULT"
+
+#: An inline encrypted value: `password: !vault |`.
+_VAULT_TAG = "!vault"
+
+
+class VaultRefused(PatchError):
+    """Raised when a target is ansible-vault encrypted."""
+
+
+def _refuse_if_vault(path: Path, original: str, target_rel: str) -> None:
+    stripped = original.lstrip("﻿ \t\r\n")
+    if stripped.startswith(_VAULT_HEADER):
+        raise VaultRefused(
+            f"refusing to write {target_rel}: it is ansible-vault encrypted. "
+            f"Decrypt it, re-run, and re-encrypt — the agent will not write "
+            f"plaintext over a secrets file.")
+    if _VAULT_TAG in original:
+        raise VaultRefused(
+            f"refusing to write {target_rel}: it contains inline !vault values. "
+            f"A round-trip edit would not preserve them.")
+
+
 def _validate_yaml(path: Path, content: str) -> None:
     """Raise PatchError if ``content`` is not valid YAML for the given path."""
     if path.suffix not in (".yml", ".yaml"):
@@ -53,6 +84,30 @@ def _validate_yaml(path: Path, content: str) -> None:
         yaml.safe_load(content)
     except yaml.YAMLError as e:
         raise PatchError(f"patched {path.name} is invalid YAML: {e}") from e
+
+
+def _write_atomically(target: Path, content: str) -> None:
+    """Write via a temp file in the same directory, then rename.
+
+    ``Path.write_text`` truncates first. A write that fails part-way — ENOSPC,
+    a quota, EFBIG — therefore leaves the operator with a file cut off mid-key
+    that may still parse as YAML, so nothing downstream notices. os.replace is
+    atomic within a filesystem, so the target is either the old file or the new
+    one and never a prefix of the new one.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def check_allowed(target_rel: str | Path, note: str | None = None) -> None:
@@ -110,7 +165,37 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     if not target.exists():
         raise PatchError(f"target_file does not exist: {target_rel}")
 
-    original = target.read_text()
+    # Gate 2c: a hardlink shares an inode with a path the allowlist never saw,
+    # and Path.resolve() cannot see it. Truncating in place would write through
+    # to every other name for the same bytes.
+    try:
+        if target.stat().st_nlink > 1:
+            raise PathNotAllowed(
+                f"refusing to write {target_rel}: it is a hardlink "
+                f"({target.stat().st_nlink} names for the same file), so the "
+                f"write surface cannot bound where the bytes land.")
+    except OSError as e:
+        raise PatchError(f"cannot stat {target_rel}: {e}") from e
+
+    try:
+        raw = target.read_bytes()
+    except OSError as e:
+        raise PatchError(f"cannot read {target_rel}: {e}") from e
+
+    # Preserve the file's own encoding conventions. read_text/write_text
+    # normalise CRLF to LF and drop a BOM, so a one-line change to a
+    # Windows-authored file came out as a whole-file rewrite in the diff, and a
+    # BOM took the leading `---` with it.
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    if bom:
+        raw = raw[3:]
+    text = raw.decode("utf-8")
+    crlf = "\r\n" in text
+    original = text.replace("\r\n", "\n") if crlf else text
+
+    # Gate 2d: never write plaintext over encrypted secrets.
+    _refuse_if_vault(target, original, target_rel)
+
     patched = ACTIONS[action](original, fix, target_rel)
 
     if patched == original:
@@ -121,7 +206,15 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     _validate_yaml(target, patched)
 
     if not dry_run:
-        target.write_text(patched)
+        restored = patched.replace("\n", "\r\n") if crlf else patched
+        if bom:
+            restored = "﻿" + restored
+        try:
+            _write_atomically(target, restored)
+        except OSError as e:
+            # Read-only tree, wrong owner, full disk. A reported failure, not a
+            # traceback out of the CLI.
+            raise PatchError(f"cannot write {target_rel}: {e}") from e
 
     return {
         "target_file": target_rel,

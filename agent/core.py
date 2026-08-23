@@ -112,6 +112,32 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
             return _heal_dry_run(playbook, use_llm, transcript, result)
 
     git_helper.init_if_needed()
+
+    if mode in (MODE_APPLY, MODE_PR):
+        blocker = committer.commit_guard()
+        if blocker:
+            result.declined.append(blocker)
+            result.push_error = blocker
+            return result
+        # One writer per repository: git's index is a single shared file, and
+        # two concurrent runs interleaved add/commit badly enough that one
+        # run's staged edit landed inside the other's commit.
+        try:
+            with git_helper.exclusive_lock():
+                return _heal_locked(playbook, max_retries, use_llm, transcript,
+                                    result, mode, remote)
+        except git_helper.GitStateError as e:
+            result.declined.append(str(e))
+            result.push_error = str(e)
+            return result
+
+    return _heal_locked(playbook, max_retries, use_llm, transcript, result,
+                        mode, remote)
+
+
+def _heal_locked(playbook, max_retries, use_llm, transcript, result, mode,
+                 remote):
+    """The heal loop proper, once the repository lock (if any) is held."""
     if mode == MODE_PR:
         return _heal_pr(playbook, use_llm, transcript, result, remote)
     return _heal_apply(playbook, max_retries, use_llm, transcript, result)
@@ -164,7 +190,12 @@ def _diagnose_and_patch(failure: dict, use_llm: bool, transcript: Transcript | N
         if transcript:
             transcript.patch_failed(fix, str(e))
         if not (use_llm and "_fallback_reason" not in diag):
-            return None, diag, None
+            # A vault-encrypted target, an unwritable file, a hardlink, a patch
+            # that would change nothing. These existed only inside the
+            # transcript, so `--no-transcript` made a run that did nothing look
+            # like a run that found nothing.
+            return None, diag, {"failed_reason": str(e),
+                                "target_file": (fix or {}).get("target_file")}
 
         # The LLM produced a patch that did not apply. Try the deterministic
         # diagnoser once, then give up on this failure.
@@ -261,9 +292,20 @@ def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResul
                 result.blocked.append(patch["blocked_reason"])
             if patch and patch.get("declined_reason"):
                 result.declined.append(patch["declined_reason"])
+            if patch and patch.get("failed_reason"):
+                result.declined.append(patch["failed_reason"])
             if fix is None:
                 continue
-            sha = committer.commit_fix(fix, diag)
+            try:
+                sha = committer.commit_fix(fix, diag)
+            except git_helper.GitStateError as e:
+                # A failing pre-commit hook, a submodule, an ignored path. The
+                # edit is on disk and staged; saying "success" here is how the
+                # agent used to leave work stranded in the index.
+                result.declined.append(f"patched {fix.get('target_file')} but {e}")
+                if transcript:
+                    transcript.commit_failed(fix, str(e))
+                continue
             rec.commits.append(sha)
             # A fix the agent has already applied in an earlier iteration is not
             # progress, even though it changed a file: it means two failures are
@@ -318,6 +360,9 @@ def _heal_dry_run(playbook, use_llm, transcript, result) -> HealResult:
         declined = patch.get("declined_reason") if patch else None
         if declined:
             result.declined.append(declined)
+        failed = patch.get("failed_reason") if patch else None
+        if failed:
+            result.declined.append(failed)
         result.proposals.append(Proposal(
             failure=failure,
             diagnosis=diag,
@@ -365,22 +410,18 @@ def _heal_pr(playbook, use_llm, transcript, result, remote) -> HealResult:
     if transcript:
         transcript.branch_created(branch, base)
 
-    for failure in run.failures:
-        fix, diag, patch = _diagnose_and_patch(failure, use_llm, transcript, rec)
-        if patch and patch.get("blocked_reason"):
-            result.blocked.append(patch["blocked_reason"])
-        if patch and patch.get("declined_reason"):
-            result.declined.append(patch["declined_reason"])
-        if fix is None:
-            continue
-        sha = committer.commit_fix(fix, diag)
-        rec.commits.append(sha)
-        if transcript:
-            transcript.committed(sha, fix)
+    try:
+        _pr_patch_loop(run, use_llm, transcript, rec, result)
+    except Exception:
+        # Any escape here used to strand the operator on the heal branch, which
+        # is the one thing PR mode promises not to do.
+        git_helper.checkout(base)
+        raise
 
     if not rec.commits:
         git_helper.checkout(base)
-        result.push_error = "no patches applied; nothing to open a PR for"
+        result.push_error = (result.push_error
+                             or "no patches applied; nothing to open a PR for")
         return result
 
     if git_helper.has_remote(remote):
@@ -400,6 +441,30 @@ def _heal_pr(playbook, use_llm, transcript, result, remote) -> HealResult:
     if transcript:
         transcript.pr_summary(result)
     return result
+
+
+def _pr_patch_loop(run, use_llm, transcript, rec, result) -> None:
+    for failure in run.failures:
+        fix, diag, patch = _diagnose_and_patch(failure, use_llm, transcript, rec)
+        if patch and patch.get("blocked_reason"):
+            result.blocked.append(patch["blocked_reason"])
+        if patch and patch.get("declined_reason"):
+            result.declined.append(patch["declined_reason"])
+        if patch and patch.get("failed_reason"):
+            result.declined.append(patch["failed_reason"])
+        if fix is None:
+            continue
+        try:
+            sha = committer.commit_fix(fix, diag)
+        except git_helper.GitStateError as e:
+            result.declined.append(f"patched {fix.get('target_file')} but {e}")
+            if transcript:
+                transcript.commit_failed(fix, str(e))
+            continue
+        rec.commits.append(sha)
+        if transcript:
+            transcript.committed(sha, fix)
+
 
 
 def _open_pull_request(branch: str, base: str, rec: IterationRecord) -> str | None:
@@ -517,6 +582,12 @@ class Transcript:
         self._lines.append("")
         self._lines.append("PR mode: the base branch will not be modified and the "
                            "pipeline will not be re-run.")
+        self._lines.append("")
+
+    def commit_failed(self, fix: dict, reason: str) -> None:
+        self._lines.append(
+            f"**Commit FAILED** — `{fix.get('target_file')}` was patched, but "
+            f"{reason}. The change is on disk and staged, not committed.")
         self._lines.append("")
 
     def declined(self, failure: dict, reason: str) -> None:

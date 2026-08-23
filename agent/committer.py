@@ -20,6 +20,23 @@ def commit_fix(fix: dict[str, Any], diagnosis: dict[str, Any]) -> str:
     return git_helper.commit(msg)
 
 
+def commit_guard() -> str | None:
+    """Why committing right now would be wrong, or None if it is safe.
+
+    Checked before the agent writes anything, not after: discovering a merge in
+    progress once the edits are staged is too late to be polite about.
+    """
+    busy = git_helper.in_progress_operation()
+    if busy:
+        return (f"{busy} in the target repository; the agent will not commit "
+                f"into it. Finish or abort that operation and re-run.")
+    if git_helper.is_detached():
+        return ("the target repository has a detached HEAD; commits made here "
+                "would not be reachable from any branch. Check out a branch "
+                "and re-run.")
+    return None
+
+
 def _build_message(fix: dict, diagnosis: dict) -> str:
     ftype = diagnosis.get("failure_type", "other")
     target = fix.get("target_file", "")
