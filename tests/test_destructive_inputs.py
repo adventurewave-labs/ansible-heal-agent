@@ -74,7 +74,7 @@ def repo(scratch_repo: Path) -> Path:
     return scratch_repo
 
 
-# ── secrets ──────────────────────────────────────────────────────────
+# ── secrets ─────────────────────────────────────────────────────────
 
 VAULT = ("$ANSIBLE_VAULT;1.1;AES256\n"
          "37623433383166326566396633383864613463396264616238\n"
@@ -126,7 +126,7 @@ def test_a_hardlinked_target_is_refused(repo, tmp_path):
     assert outside.read_text() == "secret: original\n"
 
 
-# ── the operator's git state ───────────────────────────────────────
+# ── the operator's git state ────────────────────────────────────────
 
 def test_a_merge_in_progress_is_never_concluded_by_the_agent(repo):
     """The agent used to `git add` + `git commit` straight through a conflicted
@@ -456,7 +456,7 @@ def test_a_glob_matches_group_names_too(repo):
     assert sorted(result.succeeded_hosts) == ["alpha", "beta"]
 
 
-# ── the operator's other files ────────────────────────────────────
+# ── the operator's other files ──────────────────────────────────────
 
 def test_a_worktree_is_recognised_as_a_repository(repo, tmp_path):
     """In a worktree — and in a submodule — `.git` is a *file*, not a directory.
@@ -511,7 +511,7 @@ def test_initialising_a_directory_does_not_commit_what_was_already_there(
     assert ".env" not in committed, "committed a file it was never asked to touch"
 
 
-# ── inputs that used to raise ─────────────────────────────────────
+# ── inputs that used to raise ───────────────────────────────────────
 
 @pytest.mark.parametrize("name,playbook,expect", [
     ("import cycle", "- import_playbook: site.yml\n", "cycle"),
