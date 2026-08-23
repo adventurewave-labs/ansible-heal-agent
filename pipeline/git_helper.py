@@ -26,15 +26,47 @@ def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
     )
 
 
+def git_dir() -> Path:
+    """The real .git directory, which is a *file* in a worktree or submodule."""
+    proc = _git("rev-parse", "--absolute-git-dir")
+    if proc.returncode == 0 and proc.stdout.strip():
+        return Path(proc.stdout.strip())
+    return repo_root() / ".git"
+
+
+def is_repo() -> bool:
+    """True if the target already belongs to a git repository.
+
+    `(root / ".git").is_dir()` is False in a worktree and in a submodule, where
+    `.git` is a file pointing elsewhere. Treating those as "not a repository"
+    made the agent `git init` on top of a real one.
+
+    "Inside a work tree" is not sufficient either: a scratch directory created
+    *under* a repository but ignored by it — the demo workspace, a tmpdir in a
+    checkout — is inside one and belongs to none, and commits aimed at it would
+    silently stage nothing. Such a directory gets its own repository; an
+    ordinary subdirectory keeps using the enclosing one.
+    """
+    proc = _git("rev-parse", "--is-inside-work-tree")
+    if proc.returncode != 0 or proc.stdout.strip() != "true":
+        return False
+    top = _git("rev-parse", "--show-toplevel").stdout.strip()
+    if top and Path(top).resolve() == repo_root().resolve():
+        return True
+    return _git("check-ignore", "-q", ".").returncode != 0
+
+
 def init_if_needed() -> None:
     """Ensure a git repo exists at the target root, with an identity configured."""
-    root = repo_root()
-    if not (root / ".git").is_dir():
+    if not is_repo():
         _git("init", "-b", "main")
         _git("config", "user.email", "agent@ansible-heal.local")
         _git("config", "user.name", "Ansible Heal Agent")
-        _git("add", ".")
-        _git("commit", "-m", "chore: initial baseline")
+        # Deliberately NOT `git add .` + commit. Initialising someone's
+        # directory is already presumptuous; sweeping every file in it into a
+        # commit authored by the agent — a stray .env, a work-in-progress file
+        # — is not the agent's call to make. The agent's own commits stage only
+        # the files it actually edits.
     elif not _git("config", "user.email").stdout.strip():
         # Containers frequently have no global identity configured.
         _git("config", "user.email", "agent@ansible-heal.local")
@@ -54,8 +86,9 @@ def exclusive_lock(timeout: float = 60.0):
     other's commit, and edits were routinely left staged but never committed.
     """
     root = repo_root()
-    lock_path = root / ".git" / "ansible-heal.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_dir = git_dir()
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "ansible-heal.lock"
     deadline = time.monotonic() + timeout
     handle = lock_path.open("w")
     try:
@@ -94,9 +127,9 @@ _IN_PROGRESS_MARKERS = (
 
 def in_progress_operation() -> str | None:
     """Describe any half-finished git operation, or None if the tree is idle."""
-    git_dir = repo_root() / ".git"
+    marker_dir = git_dir()
     for name, description in _IN_PROGRESS_MARKERS:
-        if (git_dir / name).exists():
+        if (marker_dir / name).exists():
             return description
     return None
 

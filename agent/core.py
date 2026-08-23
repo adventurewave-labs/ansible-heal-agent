@@ -84,6 +84,11 @@ class HealResult:
     blocked: list[str] = field(default_factory=list)
     declined: list[str] = field(default_factory=list)
 
+    def decline(self, reason: str) -> None:
+        """Record a refusal once, however many iterations re-discover it."""
+        if reason and reason not in self.declined:
+            self.declined.append(reason)
+
 
 def heal(playbook: str = "ansible/playbooks/site.yml",
          max_retries: int = 3,
@@ -116,7 +121,7 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
     if mode in (MODE_APPLY, MODE_PR):
         blocker = committer.commit_guard()
         if blocker:
-            result.declined.append(blocker)
+            result.decline(blocker)
             result.push_error = blocker
             return result
         # One writer per repository: git's index is a single shared file, and
@@ -127,7 +132,7 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
                 return _heal_locked(playbook, max_retries, use_llm, transcript,
                                     result, mode, remote)
         except git_helper.GitStateError as e:
-            result.declined.append(str(e))
+            result.decline(str(e))
             result.push_error = str(e)
             return result
 
@@ -291,9 +296,9 @@ def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResul
             if patch and patch.get("blocked_reason"):
                 result.blocked.append(patch["blocked_reason"])
             if patch and patch.get("declined_reason"):
-                result.declined.append(patch["declined_reason"])
+                result.decline(patch["declined_reason"])
             if patch and patch.get("failed_reason"):
-                result.declined.append(patch["failed_reason"])
+                result.decline(patch["failed_reason"])
             if fix is None:
                 continue
             try:
@@ -302,7 +307,7 @@ def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResul
                 # A failing pre-commit hook, a submodule, an ignored path. The
                 # edit is on disk and staged; saying "success" here is how the
                 # agent used to leave work stranded in the index.
-                result.declined.append(f"patched {fix.get('target_file')} but {e}")
+                result.decline(f"patched {fix.get('target_file')} but {e}")
                 if transcript:
                     transcript.commit_failed(fix, str(e))
                 continue
@@ -359,10 +364,10 @@ def _heal_dry_run(playbook, use_llm, transcript, result) -> HealResult:
             result.blocked.append(blocked)
         declined = patch.get("declined_reason") if patch else None
         if declined:
-            result.declined.append(declined)
+            result.decline(declined)
         failed = patch.get("failed_reason") if patch else None
         if failed:
-            result.declined.append(failed)
+            result.decline(failed)
         result.proposals.append(Proposal(
             failure=failure,
             diagnosis=diag,
@@ -449,15 +454,15 @@ def _pr_patch_loop(run, use_llm, transcript, rec, result) -> None:
         if patch and patch.get("blocked_reason"):
             result.blocked.append(patch["blocked_reason"])
         if patch and patch.get("declined_reason"):
-            result.declined.append(patch["declined_reason"])
+            result.decline(patch["declined_reason"])
         if patch and patch.get("failed_reason"):
-            result.declined.append(patch["failed_reason"])
+            result.decline(patch["failed_reason"])
         if fix is None:
             continue
         try:
             sha = committer.commit_fix(fix, diag)
         except git_helper.GitStateError as e:
-            result.declined.append(f"patched {fix.get('target_file')} but {e}")
+            result.decline(f"patched {fix.get('target_file')} but {e}")
             if transcript:
                 transcript.commit_failed(fix, str(e))
             continue
@@ -493,7 +498,7 @@ def _open_pull_request(branch: str, base: str, rec: IterationRecord) -> str | No
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
 
 
-# ── Transcript writer ──────────────────────────────────────────────
+# ── Transcript writer ────────────────────────────────────────────
 
 class Transcript:
     """Append-only Markdown transcript writer used by the heal loop."""

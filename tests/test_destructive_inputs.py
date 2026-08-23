@@ -10,6 +10,7 @@ always the same: refuse, say why, change nothing.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -61,7 +62,7 @@ def repo(scratch_repo: Path) -> Path:
     return scratch_repo
 
 
-# ── secrets ─────────────────────────────────────────────────────────
+# ── secrets ──────────────────────────────────────────────────────────
 
 VAULT = ("$ANSIBLE_VAULT;1.1;AES256\n"
          "37623433383166326566396633383864613463396264616238\n"
@@ -298,26 +299,295 @@ def test_a_variable_named_hosts_does_not_invent_a_group(repo):
 
 # ── variables the operator has already defined ──────────────────────
 
-def test_a_variable_in_a_group_vars_file_for_one_group_is_seen(repo):
-    """Only `group_vars/all*` was read, so a variable set in
-    `group_vars/webservers.yml` looked undefined and a fabricated default was
-    committed over it."""
+def test_a_variable_defined_for_only_some_hosts_is_neither_overwritten_nor_ignored(repo):
+    """`group_vars/webservers.yml` defines it; `group_vars/all.yml` does not.
+
+    Two wrong answers were available and the agent has given both. Writing a
+    global default overrides the operator's per-group value for every other
+    host. Merging every vars file into one namespace and calling the run green
+    hides a play that genuinely fails on a host the variable was not defined
+    for. The honest answer is to say which file defines it and stop.
+    """
     _write(repo, "ansible/group_vars/webservers.yml", "nginx_port: 9443\n")
     _write(repo, "ansible/playbooks/site.yml", _needs_var())
     before = (repo / "ansible" / "group_vars" / "all.yml").read_text()
 
     result = heal(max_retries=3, use_llm=False)
 
-    assert result.success
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
+    assert not result.success
+    assert any("webservers.yml" in d for d in result.declined), result.declined
 
 
-def test_a_variable_in_host_vars_is_seen(repo):
+def test_a_variable_defined_in_host_vars_is_treated_the_same_way(repo):
     _write(repo, "ansible/host_vars/web-01.yml", "nginx_port: 9443\n")
     _write(repo, "ansible/playbooks/site.yml", _needs_var())
     before = (repo / "ansible" / "group_vars" / "all.yml").read_text()
 
     result = heal(max_retries=3, use_llm=False)
 
-    assert result.success
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
+    assert any("web-01.yml" in d for d in result.declined), result.declined
+
+
+# ── patterns the runner must not mangle before the guard sees them ──
+
+def test_an_ipv6_host_is_not_split_on_its_colons(repo):
+    """`fd00::21` is one host. Ansible is IPv6-aware; the runner was not.
+
+    It split the pattern into the tokens `fd00` and `21` *before* the
+    diagnoser's "is this one hostname?" guard ran, so the guard was applied to
+    a fragment that looked perfectly ordinary — and a real address was renamed
+    to `fd00`. The guard is only as good as the layer it runs at.
+    """
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            v6:
+              hosts:
+                "fd00::22": {ansible_user: ubuntu}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: 'fd00::21'
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+
+    result = heal(max_retries=3, use_llm=False)
+
+    inventory = (repo / "ansible" / "inventory.yml").read_text()
+    assert "fd00::21" in inventory, "did not heal to the address the play wants"
+    assert "fd00::22" not in inventory
+    # The fragment the old split produced. `fd00:` as a bare key would be a
+    # different host entirely, and the play would still match nothing.
+    assert not re.search(r"^\s+fd00:\s*$", inventory, re.M), "renamed to a fragment"
+    assert result.success
+
+
+def test_an_ipv6_pattern_that_matches_is_not_a_failure(repo):
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            v6:
+              hosts:
+                "fd00::21": {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: 'fd00::21'
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+
+
+def test_a_question_mark_glob_matches_rather_than_renaming(repo):
+    """`?` is an Ansible glob. It was in neither the matcher nor the guard's
+    metacharacter set, so a working repo had its host renamed to `othe?`."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            g:
+              hosts:
+                other: {ansible_host: 10.0.1.9}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: 'othe?'
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+    assert result.succeeded_hosts == ["other"]
+
+
+def test_a_glob_matches_group_names_too(repo):
+    """Real Ansible resolves `prod*` against groups as well as hosts."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            production:
+              hosts:
+                alpha: {}
+                beta: {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: 'prod*'
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+    assert sorted(result.succeeded_hosts) == ["alpha", "beta"]
+
+
+# ── the operator's other files ─────────────────────────────────────
+
+def test_a_worktree_is_recognised_as_a_repository(repo, tmp_path):
+    """In a worktree — and in a submodule — `.git` is a *file*, not a directory.
+
+    Reading that as "not a repository" made the agent `git init` on top of a
+    real one and, before the same commit fixed it, `git add .` the operator's
+    untracked work into a commit authored by the agent.
+    """
+    _write(repo, "ansible/playbooks/site.yml", _needs_var())
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "base")
+    tree = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", str(tree), "-b", "wt")
+    (tree / "secret-wip.txt").write_text("unrelated\n")
+
+    from agent import config
+    before = _git(tree, "rev-list", "--count", "HEAD").strip()
+    config.set_repo_root(tree)
+    try:
+        heal(max_retries=3, use_llm=False)
+    finally:
+        config.set_repo_root(repo)
+
+    assert (tree / ".git").is_file(), "fixture is not a worktree"
+    assert "secret-wip.txt" in _git(tree, "status", "--porcelain")
+    after = _git(tree, "rev-list", "--count", "HEAD").strip()
+    assert int(after) >= int(before), "history was rewritten"
+
+
+def test_initialising_a_directory_does_not_commit_what_was_already_there(
+        tmp_path, monkeypatch):
+    """`git init` + `git add .` swept whatever happened to be in the directory
+    — a stray .env, a work-in-progress file — into a commit authored by the
+    agent. Initialising someone's directory is presumptuous enough."""
+    from agent import config
+    from scenarios import seed
+
+    target = tmp_path / "plain"
+    (target / "private").mkdir(parents=True)
+    (target / "private" / ".env").write_text("AWS_SECRET=hunter2\n")
+    for name, body in seed.baseline_files().items():
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    monkeypatch.setattr(config, "_OVERRIDE", target.resolve())
+
+    heal(max_retries=3, use_llm=False)
+
+    committed = subprocess.run(
+        ["git", "log", "--all", "--name-only", "--format="],
+        cwd=target, capture_output=True, text=True).stdout
+    assert ".env" not in committed, "committed a file it was never asked to touch"
+
+
+# ── inputs that used to raise ──────────────────────────────────────
+
+@pytest.mark.parametrize("name,playbook,expect", [
+    ("import cycle", "- import_playbook: site.yml\n", "cycle"),
+    ("tasks not a list", "- name: P\n  hosts: web-01\n  tasks: notalist\n",
+     "not a list"),
+    ("task not a mapping", "- name: P\n  hosts: web-01\n  tasks: [notadict]\n",
+     "not a mapping"),
+    ("import escape", "- import_playbook: ../../../etc/hosts\n",
+     "outside the repository"),
+])
+def test_malformed_playbooks_are_reported_not_raised(repo, name, playbook, expect):
+    (repo / "ansible" / "playbooks" / "site.yml").write_text(playbook)
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 2, name
+    assert result.failures[0]["type"] == "unreadable_input", name
+    assert expect in result.failures[0]["message"], result.failures[0]["message"]
+
+
+def test_a_non_string_inventory_host_key_does_not_crash(repo):
+    """YAML turns bare `1234:` into an int, and difflib raised TypeError."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            g:
+              hosts:
+                1234: {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    result = heal(max_retries=3, use_llm=False)
+    assert not result.success
+    assert result.declined
+
+
+def test_a_refusal_is_reported_once_not_once_per_iteration(repo):
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            empties:
+              hosts: {}
+            g:
+              hosts:
+                empty-01: {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: empties
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    result = heal(max_retries=3, use_llm=False)
+    assert len(result.declined) == len(set(result.declined))
+
+
+def test_the_inventory_named_by_ansible_cfg_is_the_one_used(repo):
+    """Both runners hardcoded ansible/inventory.yml, so the normal way to lay
+    a repo out — pointing ansible.cfg somewhere else — read as "no inventory"."""
+    (repo / "ansible.cfg").write_text("[defaults]\ninventory = inventories/prod.yml\n")
+    _write(repo, "inventories/prod.yml", """
+        all:
+          children:
+            g:
+              hosts:
+                web-01: {}
+    """)
+    (repo / "ansible" / "inventory.yml").unlink()
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+
+
+def test_the_words_vault_in_a_comment_do_not_block_a_patch(repo):
+    """The tag check scanned the whole file for the literal string `!vault`."""
+    (repo / "ansible" / "group_vars" / "all.yml").write_text(
+        "---\n# this comment mentions !vault for no reason\nenv: prod\n")
+    _write(repo, "ansible/playbooks/site.yml", _needs_var())
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert result.success, result.declined
