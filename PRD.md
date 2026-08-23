@@ -198,7 +198,7 @@ repeatedly proposes patches that don't actually fix the underlying problem.
 | NFR-6 | WON'T    | Agent does not perform multi-region failover or capacity planning. | n/a |
 
 Each MUST requirement is covered by at least one test and exercised end-to-end
-by `demo.py` in CI. The suite is 216 tests across `tests/test_agent.py`,
+by `demo.py` in CI. The suite is 228 tests across `tests/test_agent.py`,
 `test_safety.py`, `test_perturbation.py`, `test_real_ansible.py`,
 `test_config.py`, `test_cli.py` and `test_llm.py`.
 
