@@ -367,6 +367,7 @@ def _heal_apply(playbook, max_retries, use_llm, transcript, result) -> HealResul
                 transcript.committed(sha, fix)
 
         history.append(rec)
+
         if not progressed:
             # Nothing was patched this round, so re-running would produce the
             # identical failure set. Stop instead of burning the retry budget
@@ -536,7 +537,7 @@ def _open_pull_request(branch: str, base: str, rec: IterationRecord) -> str | No
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
 
 
-# ── Transcript writer ────────────────────────────────────────────
+# ── Transcript writer ──────────────────────────────────────────────
 
 class Transcript:
     """Append-only Markdown transcript writer used by the heal loop."""
