@@ -34,6 +34,8 @@ also returns the log path so the agent can pick it up immediately.
 
 from __future__ import annotations
 
+import configparser
+import ipaddress
 import json
 import os
 import re
@@ -127,11 +129,66 @@ def _load_yaml(path: Path, expect: str = "mapping"):
 
 #: Where group_vars may live. Kept in step with agent.diagnoser, which offers
 #: the same three; the runner used to hard-code all.yml and die without it.
+def configured_inventory() -> Path | None:
+    """The inventory path from ansible.cfg, if it names one.
+
+    Both runners hardcoded ansible/inventory.yml, so a repo whose ansible.cfg
+    points elsewhere — the normal way to lay one out — was reported as having
+    no inventory at all.
+    """
+    cfg = repo_root() / "ansible.cfg"
+    if not cfg.is_file():
+        return None
+    parser = configparser.ConfigParser(allow_no_value=True, strict=False)
+    try:
+        parser.read(cfg)
+    except configparser.Error:
+        return None
+    for section in ("defaults", "inventory"):
+        if parser.has_option(section, "inventory"):
+            raw = (parser.get(section, "inventory") or "").split(",")[0].strip()
+            if raw:
+                return (repo_root() / raw).resolve()
+    return None
+
+
+def inventory_path() -> Path:
+    """Where the inventory lives: ansible.cfg's answer, else the default."""
+    return configured_inventory() or (repo_root() / "ansible" / "inventory.yml")
+
+
 _GROUP_VARS_CANDIDATES = (
     "ansible/group_vars/all.yml",
     "ansible/group_vars/all.yaml",
     "ansible/group_vars/all/main.yml",
 )
+
+
+def _load_narrow_vars() -> dict[str, str]:
+    """Variables defined only for *some* hosts, mapped to where they came from.
+
+    Merging these into one namespace let the simulator call a pipeline healthy
+    when a variable was defined for one host and undefined for its neighbour.
+    They are tracked separately so the run can say "defined in X, but not for
+    every host this play targets" and decline, rather than guess either way.
+    """
+    narrow: dict[str, str] = {}
+    for directory in ("ansible/group_vars", "ansible/host_vars"):
+        base = repo_root() / directory
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not (path.is_file() and path.suffix in (".yml", ".yaml")):
+                continue
+            if path.name in ("all.yml", "all.yaml") and path.parent == base:
+                continue
+            try:
+                data = _load_yaml(path)
+            except InputUnreadable:
+                continue
+            for name in data:
+                narrow.setdefault(str(name), _rel(path))
+    return narrow
 
 
 def _load_group_vars() -> dict:
@@ -152,18 +209,6 @@ def _load_group_vars() -> dict:
         if path.is_file():
             merged.update(_load_yaml(path))
             break
-    for directory in ("ansible/group_vars", "ansible/host_vars"):
-        base = repo_root() / directory
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*")):
-            if path.is_file() and path.suffix in (".yml", ".yaml"):
-                try:
-                    merged.update(_load_yaml(path))
-                except InputUnreadable:
-                    # One unreadable vars file must not sink the whole run;
-                    # the file the agent actually writes to is checked properly.
-                    continue
     return merged
 
 
@@ -190,7 +235,22 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
-def _expand_playbook(playbook_path: Path) -> list[dict]:
+def _plays_tasks(play: dict, source: str) -> list[dict]:
+    """A play's tasks, or a clear error. Ansible rejects both shapes below."""
+    tasks = play.get("tasks", [])
+    if tasks is None:
+        return []
+    if not isinstance(tasks, list):
+        raise InputUnreadable(
+            f"{source}: `tasks:` is a {type(tasks).__name__}, not a list")
+    for task in tasks:
+        if not isinstance(task, dict):
+            raise InputUnreadable(
+                f"{source}: a task is a {type(task).__name__}, not a mapping")
+    return tasks
+
+
+def _expand_playbook(playbook_path: Path, _seen: frozenset[Path] = frozenset()) -> list[dict]:
     """Walk a playbook file and expand ``import_playbook`` directives.
 
     Returns a flat list of play dicts (each one already has ``hosts:`` etc.).
@@ -199,13 +259,27 @@ def _expand_playbook(playbook_path: Path) -> list[dict]:
     """
     # Resolve to absolute so relative_to(repo_root()) works regardless of cwd.
     playbook_path = playbook_path.resolve()
+    if playbook_path in _seen:
+        # A playbook that imports itself, or two that import each other, used to
+        # recurse until Python gave up with a RecursionError.
+        raise InputUnreadable(
+            f"{_rel(playbook_path)} is part of an import_playbook cycle")
+    try:
+        playbook_path.relative_to(repo_root().resolve())
+    except ValueError:
+        # Writes are traversal-checked; reads were not, so an import could pull
+        # in — and parse — any file on the machine.
+        raise InputUnreadable(
+            f"import_playbook target {playbook_path} is outside the repository"
+        ) from None
+    _seen = _seen | {playbook_path}
     raw = _load_yaml(playbook_path, expect="list")
 
     expanded: list[dict] = []
     for entry in raw:
         if isinstance(entry, dict) and "import_playbook" in entry:
             sub_path = playbook_path.parent / entry["import_playbook"]
-            for sub in _expand_playbook(sub_path):
+            for sub in _expand_playbook(sub_path, _seen):
                 expanded.append(sub)
         elif isinstance(entry, dict):
             entry["_source_playbook"] = str(playbook_path.relative_to(repo_root()))
@@ -248,8 +322,28 @@ def _pattern_parts(pattern) -> list[str] | None:
         return None
     expanded: list[str] = []
     for part in parts:
-        expanded.extend(p for p in part.split(":") if p)
+        expanded.extend(_split_unions(part))
     return expanded or None
+
+
+def _looks_like_ipv6(text: str) -> bool:
+    try:
+        ipaddress.IPv6Address(text.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def _split_unions(part: str) -> list[str]:
+    """Split on ":" the way Ansible does — never through an IPv6 literal.
+
+    Ansible unions patterns on ":", but it is IPv6-aware. Splitting blindly
+    turned the host `fd00::21` into the tokens `fd00` and `21`, and the agent
+    then renamed a real address to the fragment `fd00` and reported success.
+    """
+    if _looks_like_ipv6(part):
+        return [part]
+    return [p for p in part.split(":") if p]
 
 
 def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
@@ -262,6 +356,8 @@ def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
     """
     flat: dict[str, dict] = {}
     groups: dict[str, list[str]] = {}
+    #: parent -> child group names, for children defined elsewhere in the file.
+    _group_refs: dict[str, list[str]] = {}
 
     def collect(node, group_name: str | None) -> list[str]:
         """Return every host reachable from ``node``, registering groups.
@@ -283,15 +379,15 @@ def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
         if isinstance(children, dict):
             for child_name, child in children.items():
                 mine.extend(collect(child, str(child_name)))
-        # The flat form: a group mapping sitting directly under its parent.
-        # `vars:` is explicitly excluded — a variable that happens to be called
-        # `hosts` used to register as a group with phantom members.
-        for key, value in node.items():
-            if key in ("hosts", "children", "vars", "_meta"):
-                continue
-            if isinstance(value, dict) and any(
-                    k in value for k in ("hosts", "children")):
-                mine.extend(collect(value, str(key)))
+                if group_name is not None:
+                    _group_refs.setdefault(group_name, []).append(str(child_name))
+        # Deliberately NOT recursing into other keys. Real ansible-core skips
+        # them — "Skipping unexpected key (webservers) in group (all), only
+        # vars, children and hosts are valid" — and resolves such a group to
+        # zero hosts. A previous round added "flat group" support on the belief
+        # that this shape was common and being mishandled; it is neither.
+        # Inventing hosts here made the simulator report a green run where real
+        # Ansible skips the play entirely.
         if group_name is not None:
             groups.setdefault(group_name, [])
             groups[group_name].extend(mine)
@@ -300,6 +396,27 @@ def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
     root = inv.get("all", inv)
     all_hosts = collect(root, "all" if "all" in inv else None)
     groups.setdefault("all", list(dict.fromkeys(all_hosts)))
+
+    # Group names are global in Ansible: `prod: {children: {webservers: {}}}`
+    # refers to the same `webservers` defined elsewhere in the file. Resolving
+    # by tree position alone left such a parent with zero hosts.
+    for _ in range(len(groups)):
+        changed = False
+        for parent, members in list(groups.items()):
+            for name in list(members):
+                if name in groups and name != parent:
+                    for host in groups[name]:
+                        if host not in members:
+                            members.append(host)
+                            changed = True
+        if not changed:
+            break
+    for parent, refs in list(_group_refs.items()):
+        for ref in refs:
+            for host in groups.get(ref, []):
+                if host not in groups.setdefault(parent, []):
+                    groups[parent].append(host)
+
     return flat, {g: list(dict.fromkeys(h)) for g, h in groups.items()}
 
 
@@ -329,15 +446,27 @@ def _hosts_in_inventory(inv: dict, pattern) -> list[str] | None:
             return [term]
         if term in groups:
             return list(groups[term])
+        # Globs and regexes match *group* names as well as host names in real
+        # Ansible. Matching only hosts made `prod*` look like a missing host on
+        # a repo that runs clean.
         if term.startswith("~"):
             try:
                 regex = re.compile(term[1:])
             except re.error:
                 return []
-            return [h for h in flat if regex.search(h)]
-        if "*" in term:
-            regex = re.compile("^" + re.escape(term).replace(r"\*", ".*") + "$")
-            return [h for h in flat if regex.match(h)]
+            hits = [h for h in flat if regex.search(h)]
+            for g, members in groups.items():
+                if regex.search(g):
+                    hits.extend(members)
+            return list(dict.fromkeys(hits))
+        if any(c in term for c in "*?"):
+            pattern = re.escape(term).replace(r"\*", ".*").replace(r"\?", ".")
+            regex = re.compile("^" + pattern + "$")
+            hits = [h for h in flat if regex.match(h)]
+            for g, members in groups.items():
+                if regex.match(g):
+                    hits.extend(members)
+            return list(dict.fromkeys(hits))
         return []
 
     # Ansible semantics: bare terms union, `!term` excludes, `&term` intersects.
@@ -407,8 +536,9 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
 
     # Resolve playbook_path to absolute so relative_to(repo_root()) works from any cwd.
     playbook_path = playbook_path.resolve()
-    inv = _load_yaml(repo_root() / "ansible" / "inventory.yml")
+    inv = _load_yaml(inventory_path())
     group_vars = _load_group_vars()
+    narrow_vars = _load_narrow_vars()
     playbook = _expand_playbook(playbook_path)
 
     log_lines: list[str] = []
@@ -426,7 +556,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
         play_source = play.get("_source_playbook", str(playbook_path.relative_to(repo_root())))
-        tasks = play.get("tasks", [])
+        tasks = _plays_tasks(play, play_source)
         play_vars = play.get("vars") if isinstance(play.get("vars"), dict) else {}
 
         for task in tasks:
@@ -471,6 +601,23 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
             if undefined:
                 rc = 2
                 var = undefined[0]
+                if var in narrow_vars:
+                    # Defined, but only for some hosts. Adding a global default
+                    # would change behaviour for every other host, and calling
+                    # the run green would hide a play that fails on a neighbour.
+                    failures.append({
+                        "type": "narrowly_defined_variable",
+                        "host": target if isinstance(target, str) else str(target),
+                        "variable": var,
+                        "message": (
+                            f"'{var}' is defined in {narrow_vars[var]} but not for "
+                            f"every host this play targets; the agent will not add "
+                            f"a global default over a per-host value"),
+                        "playbook": play_source,
+                        "play": play_name,
+                        "task": task_name,
+                    })
+                    continue
                 f = {
                     "type": "undefined_variable",
                     "host": target,
@@ -493,12 +640,12 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     log_lines.append("PHASE B: Runtime execution")
     log_lines.append("")
 
-    # ── Phase B: runtime execution ───────────────────────────────────────
+    # ── Phase B: runtime execution ────────────────────────────────────────
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
         play_source = play.get("_source_playbook", str(playbook_path.relative_to(repo_root())))
-        tasks = play.get("tasks", [])
+        tasks = _plays_tasks(play, play_source)
 
         hosts = _hosts_in_inventory(inv, target)
 
@@ -536,6 +683,11 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
                     "type": "unreachable_host",
                     "host": fake_host,
                     "pattern": part,
+                    # The pattern as the operator wrote it. The diagnoser's
+                    # "is this one stale hostname?" guard has to see this, not
+                    # the post-split fragment — checking the fragment meant a
+                    # pattern the runner had already mangled sailed through.
+                    "raw_pattern": target if isinstance(target, str) else str(target),
                     "message": f"UNREACHABLE! fatal: [{fake_host}]: UNREACHABLE! "
                                f"Host '{fake_host}' not found in inventory.",
                     "playbook": play_source,
@@ -669,7 +821,7 @@ def run_real(playbook_path: Path, run_id: str | None = None) -> RunResult:
     if sidecar.exists():
         sidecar.unlink()
 
-    inventory = repo_root() / "ansible" / "inventory.yml"
+    inventory = inventory_path()
     env = dict(os.environ)
     env.update({
         "ANSIBLE_CALLBACK_PLUGINS": str(CALLBACK_DIR),

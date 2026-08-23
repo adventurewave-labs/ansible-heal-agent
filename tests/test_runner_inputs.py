@@ -94,10 +94,19 @@ def test_a_list_valued_hosts_pattern_does_not_crash(repo):
     assert result.failures == []
 
 
-def test_a_group_in_a_flat_inventory_resolves(repo):
-    """Groups were only collected under `children:`, so the flat form —
-    the one most inventories in the wild use — registered none, and a working
-    repo was reported as having a missing host."""
+def test_a_flat_key_is_not_a_group_because_ansible_says_so(repo):
+    """A group mapping placed directly under `all:` is NOT a group.
+
+    An earlier round added "flat group" support believing this shape was common
+    and mishandled. Real ansible-core 2.19 disagrees:
+
+        [WARNING]: Skipping unexpected key (webservers) in group (all), only
+        "vars", "children" and "hosts" are valid
+
+    and resolves it to zero hosts. Supporting it made the simulator report a
+    green run where real Ansible skips the play entirely — a false green is
+    worse than a false failure, because nothing downstream questions it.
+    """
     _write(repo, "ansible/inventory.yml", """
         all:
           webservers:
@@ -106,7 +115,8 @@ def test_a_group_in_a_flat_inventory_resolves(repo):
     """)
     _write(repo, "ansible/playbooks/site.yml", _play("webservers"))
     result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
-    assert result.exit_code == 0, result.failures
+    assert result.exit_code == 2, "matched hosts real Ansible does not see"
+    assert result.succeeded_hosts == []
 
 
 def test_exclusion_intersection_and_regex_patterns_resolve(repo):
