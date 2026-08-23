@@ -73,6 +73,20 @@ ansible-heal run --repo ~/infra
 
 These are implemented and tested, not planned.
 
+**The agent refuses when it cannot see the whole picture.** If the repo points
+Ansible at an inventory source the agent will not read — a dynamic script, a
+directory of sources, an inventory plugin — it declines every rename, because
+the host it would delete may be defined somewhere it cannot see. It will not
+execute code the target repo supplies in order to find out.
+
+The same principle covers the rest: a module is migrated only if `ansible-doc`
+says ansible-core cannot resolve it (`apt_key` still resolves, so rewriting a
+playbook that uses it is a modernisation the operator chooses, not a repair); a
+variable is added only when it is defined nowhere Ansible would look, including
+the inventory's own `vars:` and any `vars_files:`; and a file with uncommitted
+changes is not committed at all, because `git commit -- <path>` takes the
+working tree and would fold the operator's work into the agent's commit.
+
 **The destructive step asks ansible-core, not the simulator.** Before any
 inventory rename — from the deterministic diagnoser *or* from the LLM — the
 agent runs `ansible <pattern> --list-hosts` and lets ansible-core resolve its
@@ -120,6 +134,12 @@ One deliberate non-feature: a group mapping placed directly under `all:` is
 unexpected key (webservers) in group (all)"*) and resolves it to zero hosts.
 An earlier round added support for that shape and a test asserting it; both
 were wrong, and a false green is worse than a false failure.
+
+**Only a checked host rename may touch an inventory.** An `edit_file` fix
+targeting one — the shape the LLM prompt actually asks for — is refused
+outright. A free-text search-and-replace across an inventory is not something
+this agent can validate, and a replace span once took out a host that no
+failure had ever mentioned.
 
 **One writer per repository.** Git's index is a single shared file. Two
 concurrent runs interleaved `add` and `commit` badly enough that one run's
@@ -306,7 +326,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 228 tests
+make test          # 240 tests
 make lint
 ```
 

@@ -1,13 +1,13 @@
 # Ansible-Heal-Agent — Demo Transcript
 
-- Started: `2026-08-23 08:09:52 UTC`
+- Started: `2026-08-23 09:38:18 UTC`
 - LLM bridge: `disabled` — every diagnosis below is deterministic
 
 ---
 
 ## Iteration 0
 
-- Pipeline run log: `pipeline/runs/run-20260823-080952-iter0.log`
+- Pipeline run log: `pipeline/runs/run-20260823-093818-iter0.log`
 - Exit code: `2`
 - 3 failure(s) detected.
 
@@ -16,30 +16,30 @@
 {
   "type": "removed_module",
   "host": "web-server-01",
-  "module": "ansible.builtin.apt_key",
-  "message": "The 'apt_key' module is deprecated. Use ansible.builtin.get_url to fetch the key into /usr/share/keyrings instead.",
+  "module": "ansible.builtin.docker",
+  "message": "The 'docker' module was removed. Use community.docker.docker_container.",
   "playbook": "ansible/playbooks/webservers.yml",
   "play": "Configure webservers",
-  "task": "Add nginx signing key (DEPRECATED MODULE)"
+  "task": "Run the sidecar container (REMOVED MODULE)"
 }
 ```
 
 **Diagnosis** (fallback)
 ```json
 {
-  "diagnosis": "Playbook uses the removed `apt_key` module.",
+  "diagnosis": "Playbook uses the removed `docker` module.",
   "failure_type": "removed_module",
   "fix": {
     "action": "replace_module",
     "target_file": "ansible/playbooks/webservers.yml",
-    "old_module": "apt_key",
-    "new_module": "ansible.builtin.get_url",
+    "old_module": "docker",
+    "new_module": "community.docker.docker_container",
     "new_args": {
-      "url": "https://nginx.org/keys/nginx_signing.key",
-      "dest": "/usr/share/keyrings/nginx-signing-keyring.gpg",
-      "mode": "0644"
+      "image": "nginx:latest",
+      "name": "nginx-sidecar",
+      "state": "started"
     },
-    "rationale": "apt_key is deprecated and slated for removal; fetch the key into /usr/share/keyrings and reference it explicitly instead."
+    "rationale": "the bundled docker module was removed; use the community.docker collection."
   }
 }
 ```
@@ -50,23 +50,22 @@
 ```diff
 --- a/ansible/playbooks/webservers.yml
 +++ b/ansible/playbooks/webservers.yml
-@@ -12,10 +12,10 @@
+@@ -13,11 +13,10 @@
    become: true
    tasks:
-     - name: Add nginx signing key (DEPRECATED MODULE)
--      ansible.builtin.apt_key:
-+      ansible.builtin.get_url:
-         url: https://nginx.org/keys/nginx_signing.key
--        state: present
+     - name: Run the sidecar container (REMOVED MODULE)
+-      ansible.builtin.docker:
++      community.docker.docker_container:
+         image: nginx:latest
+         name: nginx-sidecar
+         state: started
 -
-+        dest: /usr/share/keyrings/nginx-signing-keyring.gpg
-+        mode: '0644'
      - name: Ensure nginx is installed
        ansible.builtin.apt:
          name: nginx
 ```
 
-- committed: `b7edd4bf1395` → `ansible/playbooks/webservers.yml`
+- committed: `2eb9d6388214` → `ansible/playbooks/webservers.yml`
 
 ### Failure detected
 ```json
@@ -109,7 +108,7 @@
 +nginx_port: 8080
 ```
 
-- committed: `6393b72c8388` → `ansible/group_vars/all.yml`
+- committed: `2bdf607d4365` → `ansible/group_vars/all.yml`
 
 ### Failure detected
 ```json
@@ -156,11 +155,11 @@
          web-02:
 ```
 
-- committed: `8a4ec109685b` → `ansible/inventory.yml`
+- committed: `9cdc2cef92d9` → `ansible/inventory.yml`
 
 ## Iteration 1
 
-- Pipeline run log: `pipeline/runs/run-20260823-080953-iter1.log`
+- Pipeline run log: `pipeline/runs/run-20260823-093821-iter1.log`
 - Exit code: `0`
 - 0 failure(s) detected.
 
@@ -168,7 +167,7 @@
 
 ```
 PLAYBOOK: site.yml ***********************************
-PLAY [configure stack] : started at 2026-08-23 08:09:53
+PLAY [configure stack] : started at 2026-08-23 09:38:21
 
 PHASE A: Parse-time validation
 
@@ -177,7 +176,7 @@ PHASE B: Runtime execution
 
 PLAY [Configure webservers] *********************************************
 TASK [target hosts pattern 'web-server-01'] resolved to 1 host(s)
-TASK [Add nginx signing key (DEPRECATED MODULE)] *****************************************
+TASK [Run the sidecar container (REMOVED MODULE)] *****************************************
 ok: [web-server-01]
 
 TASK [Ensure nginx is installed] *****************************************
@@ -213,9 +212,8 @@ EXIT CODE: 0
 
 ### Recent git log
 ```
-8a4ec10 2026-08-23 fix(inventory): rename host to match playbook expectation
-6393b72 2026-08-23 fix(vars): add missing variable to group_vars
-b7edd4b 2026-08-23 fix(playbook): migrate deprecated module to modern equivalent
-624fd0a 2026-08-23 chore: reset to broken baseline
+9cdc2ce 2026-08-23 fix(inventory): rename host to match playbook expectation
+2bdf607 2026-08-23 fix(vars): add missing variable to group_vars
+2eb9d63 2026-08-23 fix(playbook): migrate deprecated module to modern equivalent
+fba7a4f 2026-08-23 chore: reset to broken baseline
 ```
-
