@@ -21,8 +21,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -127,6 +128,31 @@ def _keyring_name(url: str) -> str:
     return f"{stem}-keyring".replace("_", "-")
 
 
+def _run_probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    """``subprocess.run``, but a timeout kills the whole process group.
+
+    ``ansible-inventory``/``ansible``/``ansible-doc`` can themselves spawn a
+    repository-supplied dynamic-inventory script or plugin as a *child* of
+    that process. ``subprocess.run``'s own timeout handling only signals the
+    process it started directly — the grandchild, the actual hung script,
+    survived every timeout here, reparented to init, one more orphan per
+    probe that ran long. ``start_new_session=True`` put the whole tree in its
+    own process group for exactly this reason; nothing used to act on it.
+    """
+    timeout = kwargs.pop("timeout", None)
+    proc = subprocess.Popen(argv, start_new_session=True, **kwargs)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
+
+
 def _read(rel: str) -> str | None:
     path = repo_root() / rel
     return path.read_text() if path.is_file() else None
@@ -142,7 +168,7 @@ def _no_fix(reason: str, ftype: str = "other") -> dict[str, Any]:
     }
 
 
-# ── LLM path ───────────────────────────────────────────────────────
+# ── LLM path ───────────────────────────────────────────
 
 def _load_context(failure: dict, root: Path) -> str:
     """Load the files most relevant to this failure."""
@@ -166,7 +192,7 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
     return llm.chat_json(prompt, system=SYSTEM_PROMPT)
 
 
-# ── deterministic rules ─────────────────────────────────────────────
+# ── deterministic rules ──────────────────────────────────
 
 #: Characters that make a `hosts:` value a *pattern* rather than a hostname:
 #: separators, exclusion, intersection, ranges, regex and globs.
@@ -313,9 +339,9 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
     except Exception:
         pass
     try:
-        proc = subprocess.run(
-            argv, cwd=str(repo_root()), capture_output=True,
-            text=True, timeout=60, env=env, start_new_session=True,
+        proc = _run_probe(
+            argv, cwd=str(repo_root()), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=60, env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -396,9 +422,9 @@ def ansible_resolves(pattern: str) -> bool | None:
     answered = False
     for argv in attempts:
         try:
-            proc = subprocess.run(
-                argv, cwd=str(repo_root()), capture_output=True, text=True,
-                timeout=30, env=env, start_new_session=True,
+            proc = _run_probe(
+                argv, cwd=str(repo_root()), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, timeout=30, env=env,
             )
         except (OSError, subprocess.SubprocessError):
             return None
@@ -445,25 +471,64 @@ def module_resolves(module: str) -> bool | None:
     if not exe or not module or module.startswith("-"):
         return None
     try:
-        proc = subprocess.run(
+        proc = _run_probe(
             [exe, "-t", "module", "-j", module], cwd=str(repo_root()),
-            capture_output=True, text=True, timeout=30, start_new_session=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=30,
             env={**os.environ, "ANSIBLE_DEPRECATION_WARNINGS": "False"},
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    combined = proc.stdout + proc.stderr
+    # ansible-doc reports an unresolvable module two ways, and the exit code
+    # alone cannot tell them apart from a genuine answer: it exits 0 for a
+    # name it has never heard of (`{}` plus a "was not found" warning), and
+    # it exits *1* for a name it tombstoned outright — removed on a
+    # deprecation cycle, with a message naming the replacement. Gating on the
+    # exit code before the message text treated the second, more definite
+    # case as unanswerable (None) rather than False.
+    if re.search(rf"{re.escape(module)}.{{0,20}}was not found", combined):
+        return False
+    if re.search(r"module has been removed\b", combined):
+        return False
     if proc.returncode != 0:
         return None
-    # ansible-doc exits 0 either way and says so in the payload: a module it
-    # cannot find yields `{}` plus a "was not found" warning. The exit code
-    # alone reported every name as resolvable, including invented ones.
-    if re.search(rf"{re.escape(module)}.{{0,20}}was not found", proc.stdout + proc.stderr):
-        return False
     try:
         doc = json.loads(proc.stdout[proc.stdout.index("{"):])
     except (ValueError, json.JSONDecodeError):
         return None
     return bool(doc)
+
+
+def _host_vars_candidates() -> list[Path]:
+    """Every directory Ansible would look for ``host_vars/`` next to, for this repo.
+
+    Ansible discovers ``host_vars/`` relative to wherever an inventory source
+    actually lives, not only under the flat ``ansible/`` convention this used
+    to hardcode. A repo whose inventory lives at
+    ``ansible/inventories/prod/hosts.yml`` keeps its host_vars at
+    ``ansible/inventories/prod/host_vars/`` — real, live vars that
+    ``ansible-inventory`` genuinely merges in — and the flat-only check never
+    looked there, so a rename it called safe orphaned them anyway.
+    """
+    root = repo_root()
+    bases = {root / "ansible"}
+    try:
+        from pipeline.runner import configured_inventory_sources
+        for source in configured_inventory_sources():
+            try:
+                path = (root / source).resolve()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            bases.add(path if path.is_dir() else path.parent)
+    except Exception:
+        pass
+    try:
+        inv = (root / _inventory_rel()).resolve()
+        bases.add(inv if inv.is_dir() else inv.parent)
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return sorted(bases)
 
 
 def _host_vars_file(host: str) -> str | None:
@@ -472,11 +537,57 @@ def _host_vars_file(host: str) -> str | None:
     A rename that leaves it behind silently detaches every variable the host
     had — connection details included — and breaks plays that were working.
     """
-    for suffix in (".yml", ".yaml"):
-        rel = f"ansible/host_vars/{host}{suffix}"
-        if (repo_root() / rel).is_file():
-            return rel
+    root = repo_root()
+    for base in _host_vars_candidates():
+        for suffix in (".yml", ".yaml"):
+            path = base / "host_vars" / f"{host}{suffix}"
+            if path.is_file():
+                try:
+                    return str(path.relative_to(root))
+                except ValueError:
+                    return str(path)
     return None
+
+
+def _add_host_created_names() -> set[str]:
+    """Host names any play in this repo creates at runtime via ``add_host``.
+
+    ``add_host`` is an ordinary "provision then target" pattern: an earlier
+    play registers a host that exists only for the rest of that run, and
+    ``ansible-inventory`` — the authority the rename below otherwise trusts
+    completely — has no way to see it, by design. When that runtime name
+    happens to be a near-miss for an unrelated, already-defined static host —
+    an everyday naming-convention collision, not a contrived one — the
+    closest-match rename mistook the real host for a stale spelling of the
+    runtime one and renamed it away.
+    """
+    names: set[str] = set()
+    for path in sorted(repo_root().glob(_PLAYBOOK_GLOB)):
+        try:
+            plays = yaml.safe_load(path.read_text()) or []
+        except yaml.YAMLError:
+            continue
+        if not isinstance(plays, list):
+            continue
+        for play in plays:
+            if not isinstance(play, dict):
+                continue
+            for task in play.get("tasks") or []:
+                if not isinstance(task, dict):
+                    continue
+                for key in ("add_host", "ansible.builtin.add_host"):
+                    block = task.get(key)
+                    if isinstance(block, dict):
+                        for field in ("name", "hostname"):
+                            value = block.get(field)
+                            if isinstance(value, str) and value:
+                                names.add(value)
+                    elif isinstance(block, str):
+                        # `add_host: name=foo groups=bar` free-form shape.
+                        m = re.search(r"(?:^|\s)(?:name|hostname)=(\S+)", block)
+                        if m:
+                            names.add(m.group(1))
+    return names
 
 
 def _play_host_patterns() -> dict[str, str]:
@@ -567,6 +678,13 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
             f"inventory is not stale — the bundled simulator failed to match a "
             f"pattern it does not implement. Re-run with PIPELINE_RUNNER=real "
             f"for an accurate pipeline result")
+
+    if str(expected) in _add_host_created_names():
+        return _no_fix(
+            f"'{expected}' is created at runtime by an add_host task in this "
+            f"repo's playbooks; ansible-inventory cannot see it by design, "
+            f"and a static host with a similar name is not evidence that "
+            f"'{expected}' is a stale spelling of it")
 
     inventory = _read(_inventory_rel())
     if inventory is None:
@@ -768,25 +886,50 @@ def _is_inventory_target(target: str) -> bool:
     `./ansible/hosts.yml`, `ansible//inventory.yml` and a second inventory file
     under `ansible/inventory/` all reach the patcher, which normalises them —
     so a comparison against one exact string let a rewrite through unchecked.
+    Resolving both sides on the filesystem, rather than comparing strings,
+    also covers a symlinked inventory and an absolute path in a second
+    `ansible.cfg` source, and treats a *directory*-configured inventory
+    (`inventory = ansible/inventories/`) as covering every file inside it —
+    ansible-core reads the whole directory as one inventory, and a
+    string-exact comparison only ever matched the directory's own path.
     """
     if not target:
         return False
-    normalised = PurePosixPath(target.replace("\\", "/")).as_posix()
-    normalised = normalised.removeprefix("./")
-    normalised = PurePosixPath(*[p for p in PurePosixPath(normalised).parts
-                                 if p not in (".", "")]).as_posix()
-    if normalised == _inventory_rel():
+    try:
+        target_abs = (repo_root() / target).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+    def matches(source_raw: str) -> bool:
+        try:
+            source_abs = (repo_root() / source_raw).resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        if source_abs == target_abs:
+            return True
+        try:
+            is_dir = source_abs.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            try:
+                target_abs.relative_to(source_abs)
+                return True
+            except ValueError:
+                return False
+        return False
+
+    if matches(_inventory_rel()):
         return True
-    # Every source the repo configures counts, not just the first — and a
-    # filename heuristic counted the wrong things in both directions: it missed
-    # a second inventory file, and it refused legitimate fixes to
+    # Every source the repo configures counts, not just the first — a
+    # filename heuristic counted the wrong things in both directions: it
+    # missed a second inventory file, and it refused legitimate fixes to
     # `playbooks/bastion-hosts.yml` and `inventories/prod/group_vars/all.yml`
     # on the strength of a substring.
     try:
         from pipeline.runner import configured_inventory_sources
         for source in configured_inventory_sources():
-            src = PurePosixPath(source.replace("\\", "/")).as_posix()
-            if src.removeprefix("./") == normalised:
+            if matches(source):
                 return True
     except Exception:
         pass
@@ -870,11 +1013,67 @@ def _guard_inventory_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, 
                 f"'{new}' is already a host in {_inventory_rel()}; renaming "
                 f"'{old}' onto it would delete one of them",
                 failure.get("type", "other"))
+        if new and str(new) in _add_host_created_names():
+            return _no_fix(
+                f"'{new}' is created at runtime by an add_host task in this "
+                f"repo's playbooks; ansible-inventory cannot see it by "
+                f"design, and renaming '{old}' onto it would guess that it "
+                f"is a stale spelling rather than an unrelated host",
+                failure.get("type", "other"))
+        # This guard used to end here, so a rename proposed by the LLM never
+        # went through the same host_vars orphan check the deterministic
+        # path applies below — the exact damage class that check exists for,
+        # unguarded on the default path.
+        if old:
+            orphaned = _host_vars_file(str(old))
+            if orphaned:
+                return _no_fix(
+                    f"renaming '{old}' would orphan {orphaned}, which "
+                    f"defines variables for it by name; rename that file "
+                    f"too and re-run, or make the change deliberately",
+                    failure.get("type", "other"))
         claimed_by = _play_host_patterns().get(str(old)) if old else None
         if claimed_by:
             return _no_fix(
                 f"{claimed_by} still targets '{old}'; renaming it would break "
                 f"that play", failure.get("type", "other"))
+    return diagnosis
+
+
+def _guard_module_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, Any]:
+    """Apply the module-migration guard to a diagnosis from any source.
+
+    Mirrors ``_guard_inventory_fix``: PROMPT_TEMPLATE asks the model, for a
+    `removed_module` failure, to "replace the task's module with its modern
+    equivalent" via an `edit_file` search/replace — free text this agent
+    cannot audit for what else it might touch, and with no check at all that
+    the module it names actually needs replacing. That let an LLM-proposed
+    fix rewrite a task using `apt_key`, which still resolves on ansible-core
+    2.19, exactly the regression asking ansible-doc was supposed to have
+    closed — the check existed only on the deterministic path.
+    """
+    fix = diagnosis.get("fix") or {}
+    action = fix.get("action", "none")
+    if action == "none":
+        return diagnosis
+    if failure.get("type") != "removed_module" and action != "replace_module":
+        return diagnosis
+
+    if action == "edit_file":
+        return _no_fix(
+            f"a {action!r} fix for a removed-module failure would rewrite "
+            f"the playbook as free text; only a checked module replacement "
+            f"is permitted there", failure.get("type", "other"))
+    if action != "replace_module":
+        return diagnosis
+
+    old_module = (fix.get("old_module") or failure.get("module")
+                  or failure.get("module_short"))
+    if old_module and module_resolves(str(old_module)) is True:
+        return _no_fix(
+            f"ansible-core resolves '{old_module}', so the play is not "
+            f"broken; migrating a module that still works is a change to "
+            f"make deliberately, not a repair", failure.get("type", "other"))
     return diagnosis
 
 
@@ -886,7 +1085,9 @@ def diagnose(failure: dict, use_llm: bool = True) -> dict[str, Any]:
         result = llm_diagnose(failure)
         if "fix" not in result or "target_file" not in result.get("fix", {}):
             raise ValueError("LLM diagnosis missing required keys")
-        return _guard_inventory_fix(failure, result)
+        guarded = _guard_inventory_fix(failure, result)
+        guarded = _guard_module_fix(failure, guarded)
+        return guarded
     except Exception as e:  # noqa: BLE001
         fb = fallback_diagnose(failure)
         fb["_fallback_reason"] = str(e)

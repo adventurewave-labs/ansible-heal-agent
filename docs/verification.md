@@ -21,14 +21,14 @@ $ ruff check .
 All checks passed!
 
 $ python3 -m pytest -q
-245 passed
+259 passed
 
 $ python3 -m pytest -q --cov=agent --cov=pipeline
-TOTAL  2287 375 934 172 81%
+TOTAL  2497 421 1030 180 81%
 ```
 
 That is the command CI runs, and the one its `--cov-fail-under=78` gate applies
-to. Adding `--cov=scenarios` gives `TOTAL 2418 409 992 182 81%` — the previous
+to. Adding `--cov=scenarios` gives `TOTAL 2534 436 1044 183 81%` — the previous
 version of this file printed the two-package totals under the three-package
 command, which is exactly the kind of thing this document exists to catch.
 
@@ -37,15 +37,15 @@ command, which is exactly the kind of thing this document exists to catch.
 | `agent/config.py` | 95% |
 | `agent/llm.py` | 97% |
 | `agent/pipeline_restarter.py` | 90% |
-| `pipeline/runner.py` | 86% |
+| `pipeline/runner.py` | 87% |
 | `agent/committer.py` | 85% |
-| `agent/yaml_edit.py` | 81% |
-| `agent/cli.py` | 80% |
-| `agent/log_scanner.py` | 81% |
+| `pipeline/git_helper.py` | 85% |
 | `agent/patcher.py` | 84% |
+| `agent/cli.py` | 81% |
+| `agent/log_scanner.py` | 81% |
+| `agent/yaml_edit.py` | 81% |
+| `agent/diagnoser.py` | 74% |
 | `agent/core.py` | 70% |
-| `agent/diagnoser.py` | 75% |
-| `pipeline/git_helper.py` | 81% |
 
 The three lowest are named deliberately rather than omitted: `core.py`'s
 uncovered lines are mostly `Transcript` formatting, `git_helper.py` is the
@@ -57,17 +57,35 @@ exercised with a provider configured.
 ```console
 $ make demo
 [1/4] Seeding the broken baseline into scratch workspace .demo-workspace/ ...
-      3 failures seeded. HEAD = 2a865143f0b3
+      3 failures seeded. HEAD = 9f06296d0308
 [2/4] LLM bridge: DISABLED (no provider configured) — using the deterministic
       fallback diagnoser.
 [3/4] Running heal loop (max 3 retries) ...
-      → success=True  iterations=1  final_exit=0  elapsed=0.3s
+      → success=False  iterations=1  final_exit=2  elapsed=7.4s
       Commits the agent landed:
-        d53fc0e 2026-08-22 fix(inventory): rename host to match playbook expectation
-        dea60fc 2026-08-22 fix(vars): add missing variable to group_vars
-        e879c40 2026-08-22 fix(playbook): migrate deprecated module to modern equivalent
-        34d5e05 2026-08-22 chore: reset to broken baseline
+        d12657a 2026-08-23 fix(inventory): rename host to match playbook expectation
+        8d8b49e 2026-08-23 fix(vars): add missing variable to group_vars
+        7ba4e26 2026-08-23 fix(playbook): migrate deprecated module to modern equivalent
+        9f06296 2026-08-23 chore: reset to broken baseline
+      Note: the module class needs the community.docker collection installed
+      to reach a real green pipeline; see the transcript for what the agent
+      actually did about it.
+$ echo $?
+0
 ```
+
+`success=False` here is correct, not a demo failure: two of the three seeded
+classes converge, and the third — the removed-module class — is migrated but
+correctly does not claim a green pipeline it did not earn, because
+`community.docker.docker_container` is not installed in this environment (see
+`README.md`). `demo.py`'s own exit code reflects that distinction rather than
+`HealResult.success` directly — it is 0 here because nothing outside the known,
+expected module-collection gap is left unresolved, and 2 if anything else is.
+An earlier version of this file showed `success=True` for this same run,
+which was only ever true because the mock pipeline's removed-module check was
+a hardcoded two-name dict blind to its own agent's replacement — the section
+below on the real binary already said the module class does not reach green;
+this section now agrees with it.
 
 `docs/demo.cast` is an asciinema capture of the same command from an earlier
 run, and `docs/demo.svg` is that cast rendered by termtosvg. The SHAs in them
@@ -81,7 +99,7 @@ The program output itself is real and unedited.
 
 The single most important result, because the previous implementation could not
 do it. `tests/test_destructive_inputs.py` is the most important file in the suite:
-sixty-three repositories the agent must not damage. Every one is a case where an
+seventy-eight repositories the agent must not damage. Every one is a case where an
 earlier version made a confident, committed change that destroyed something —
 a vault-encrypted secrets file rewritten as plaintext, a production host
 renamed out of the inventory to match a group name, an operator's half-finished
@@ -100,15 +118,30 @@ confident "fix" applied to a working repository.
 
 `tests/test_perturbation.py` varies the undefined-variable name, the
 inventory/playbook host-name pair, and the module. It is **37 tests, of which
-25 require convergence** — 8 variable names, 4 host pairs, 1 module and 12
-combinations. Only one module now: the agent asks `ansible-doc` before
-migrating anything and refuses to rewrite a playbook whose module still
-resolves, so `apt_key` no longer belongs in a suite asserting convergence. The other 12 are the counterweight: 8 pin the inferred defaults
-and 4 assert the agent refuses rather than guessing.
+25 vary a failure the agent must generalise across names** — 8 variable
+names, 4 host pairs, 1 module and 12 combinations. Only one module now: the
+agent asks `ansible-doc` before migrating anything and refuses to rewrite a
+playbook whose module still resolves, so `apt_key` no longer belongs in a
+suite exercising this. The other 12 are the counterweight: 8 pin the inferred
+defaults and 4 assert the agent refuses rather than guessing.
+
+The 25 no longer assert a blanket green pipeline: they check, dynamically,
+whether the seeded module's replacement itself resolves via `ansible-doc`
+(`diagnoser.module_resolves`), and assert full convergence only when it does.
+`community.docker.docker_container` does not resolve without the
+community.docker collection, so in an environment without it — this one
+included — the host rename and the variable definition are still asserted to
+converge exactly as before, on every name; the module swap is asserted to
+land as a genuine, distinct commit, and the pipeline is asserted to stay
+honestly red over it rather than claim a green it did not earn. In an
+environment where the collection is installed, the same 25 tests assert full
+convergence, module included — the suite adapts to what is actually true
+rather than assuming either way.
 
 The specific regression that motivated the suite, reproduced ad hoc rather than
 as a fixture (rename `nginx_port` to `app_port` and the host pair away from the
-seeded names):
+seeded names, module held at a name whose replacement resolves in this
+environment):
 
 | | before | after |
 |---|---|---|

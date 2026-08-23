@@ -105,8 +105,26 @@ def main(argv: list[str] | None = None) -> int:
         shown = shown.relative_to(CHECKOUT)
     print(f"      → {shown}")
     print()
+
+    # The module class only reaches a genuinely green pipeline once its
+    # replacement itself resolves — `community.docker.docker_container`
+    # needs the community.docker collection, and installing that is the
+    # operator's decision, not the agent's (or this demo's) to make.
+    # Migrating the module is still correct and still lands a commit; the
+    # pipeline honestly staying red over it is the fix working as intended,
+    # not the demo failing. Anything else left unresolved is a real failure.
+    remaining_types = ({f.get("type") for f in result.history[-1].failures}
+                       if result.history else set())
+    demo_ok = result.success or (
+        remaining_types and remaining_types <= {"removed_module"})
+    if not result.success:
+        print("      Note: the module class needs the community.docker "
+              "collection installed to reach a real green pipeline; see the "
+              "transcript above for what the agent actually did about it.")
+        print()
+
     print("Done. Open the transcript to inspect the agent's reasoning.")
-    return 0 if result.success else 2
+    return 0 if demo_ok else 2
 
 
 if __name__ == "__main__":
