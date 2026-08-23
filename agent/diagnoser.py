@@ -18,6 +18,10 @@ from __future__ import annotations
 import difflib
 import ipaddress
 import json
+import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -194,6 +198,14 @@ def _not_a_single_hostname(expected: str) -> str | None:
         return (f"{text!r} is a multi-host pattern (Ansible splits on "
                 f"whitespace); it is not a hostname to rename to")
     # ":" unions patterns — except inside an IPv6 literal, which is a hostname.
+    # `fd00::21:10.0.0.5` is BOTH: a syntactically valid IPv6 address with an
+    # IPv4-mapped tail, and a union of `fd00::21` and `10.0.0.5`. Ansible reads
+    # it as the union. Anything carrying a dot alongside its colons is treated
+    # as ambiguous and refused, rather than guessed at.
+    if ":" in text and "." in text:
+        return (f"{text!r} is ambiguous — it parses both as one IPv6 literal "
+                f"and as a union of patterns, and Ansible reads it as the "
+                f"union; no rename is proposed")
     if ":" in text and not _looks_like_ipv6(text):
         return (f"{text!r} is an Ansible pattern, not a hostname (\':\' unions "
                 f"patterns); renaming an inventory entry to it would create a "
@@ -204,6 +216,48 @@ def _not_a_single_hostname(expected: str) -> str | None:
                 f"(contains {''.join(bad)!r}); renaming an inventory entry to "
                 f"it would create a host that no pattern resolves to")
     return None
+
+
+def ansible_resolves(pattern: str) -> bool | None:
+    """Does real Ansible match ``pattern`` against the repo's inventory?
+
+    ``True``/``False`` when ansible-core can answer, ``None`` when it is not
+    installed or the inventory is unreadable.
+
+    This exists because of a pattern that repeated across six audit rounds. The
+    bundled simulator is a reimplementation of Ansible's pattern language, and
+    every gap between it and ansible-core turned into a *destructive* bug: the
+    simulator failed to match something ordinary, and this diagnoser read "no
+    match" as "the inventory is wrong" and renamed a live host. Patching the
+    simulator one construct at a time never converged — IPv6, `?` globs,
+    whitespace separators, nested groups, exclusion, intersection each shipped
+    as a fix and each left a neighbouring case broken.
+
+    So the destructive step now asks the authority instead of trusting the
+    simulation. If ansible-core says the pattern resolves, no rename is
+    proposed, whatever the simulator thought.
+    """
+    exe = shutil.which("ansible")
+    if not exe:
+        return None
+    inventory = repo_root() / _inventory_rel()
+    if not inventory.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, str(pattern), "-i", str(inventory), "--list-hosts"],
+            cwd=str(repo_root()), capture_output=True, text=True, timeout=30,
+            env={**os.environ, "ANSIBLE_LOCALHOST_WARNING": "False",
+                 "ANSIBLE_INVENTORY_UNPARSED_WARNING": "False"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    match = re.search(r"hosts \((\d+)\)", proc.stdout)
+    if not match:
+        return None
+    return int(match.group(1)) > 0
 
 
 def _play_host_patterns() -> dict[str, str]:
@@ -261,6 +315,15 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
                    or _not_a_single_hostname(expected))
     if unambiguous:
         return _no_fix(unambiguous)
+
+    # Ask ansible-core before touching anything. A "failure" the simulator
+    # invented is not grounds for editing someone's inventory.
+    if ansible_resolves(as_written) is True:
+        return _no_fix(
+            f"ansible-core resolves {as_written!r} to at least one host, so the "
+            f"inventory is not stale — the bundled simulator failed to match a "
+            f"pattern it does not implement. Re-run with PIPELINE_RUNNER=real "
+            f"for an accurate pipeline result")
 
     inventory = _read(_inventory_rel())
     if inventory is None:

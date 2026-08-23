@@ -73,10 +73,25 @@ ansible-heal run --repo ~/infra
 
 These are implemented and tested, not planned.
 
+**The destructive step asks ansible-core, not the simulator.** Before any
+inventory rename, the agent runs `ansible <pattern> --list-hosts` against the
+repo's own inventory. If ansible-core resolves the pattern, no rename is
+proposed, whatever the simulator concluded.
+
+This is the single most important line of defence in the project, and it exists
+because of a shape that repeated across six audit rounds: the simulator failed
+to match some ordinary Ansible construct — IPv6 literals, `?` globs, whitespace
+separators, nested groups, exclusion, intersection — and the diagnoser read "no
+match" as "the inventory is wrong" and renamed a live host. Each of those was
+fixed individually and each fix left a neighbouring case broken. Patching a
+reimplementation of Ansible's pattern language toward correctness does not
+converge; asking the real thing does. Where ansible-core is not installed the
+guards below still apply, but the pipeline result is a simulation and the
+README says so.
+
 **What the simulator is not.** `pipeline/runner.py` is a simulator, and the
 gap between it and ansible-core is where nearly every destructive bug in this
-repo has come from — it fails to match something ordinary, and a diagnoser
-downstream reads "no match" as "the inventory is wrong". It now implements
+repo has come from. It now implements
 union, `!` exclusion, `&` intersection, `~regex`, `*`/`?` globs, groups nested
 or flat-by-`children`, IPv6 literals, and comma/semicolon/whitespace
 separation, and it refuses to evaluate host ranges (`web-0[1:3]`) rather than
@@ -274,7 +289,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 208 tests
+make test          # 216 tests
 make lint
 ```
 

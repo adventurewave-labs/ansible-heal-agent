@@ -19,9 +19,10 @@ def commit_fix(fix: dict[str, Any], diagnosis: dict[str, Any]) -> str:
     # file inside the write surface, the write goes through the link, so the
     # declared path's own blob is unchanged and git had nothing to commit —
     # leaving the agent's edit sitting in the working tree, uncommitted.
-    git_helper.add(_resolved_target(target))
+    staged = _resolved_target(target)
+    git_helper.add(staged)
     msg = _build_message(fix, diagnosis)
-    return git_helper.commit(msg)
+    return git_helper.commit(msg, pathspec=staged)
 
 
 def _resolved_target(target: str) -> str:

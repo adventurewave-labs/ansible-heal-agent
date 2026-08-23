@@ -66,7 +66,12 @@ def repo_root_override(path: str | Path) -> Iterator[Path]:
 def set_repo_root(path: str | Path) -> Path:
     """Point the agent at ``path`` for the rest of the process."""
     global _OVERRIDE
-    _OVERRIDE = Path(path).expanduser().resolve()
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_dir():
+        # The environment-variable path validated this and --repo did not, so a
+        # typo surfaced as a FileNotFoundError traceback several layers down.
+        raise ConfigError(f"--repo is not a directory: {resolved}")
+    _OVERRIDE = resolved
     return _OVERRIDE
 
 

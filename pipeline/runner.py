@@ -147,8 +147,16 @@ def configured_inventory() -> Path | None:
     for section in ("defaults", "inventory"):
         if parser.has_option(section, "inventory"):
             raw = (parser.get(section, "inventory") or "").split(",")[0].strip()
-            if raw:
-                return (repo_root() / raw).resolve()
+            if not raw:
+                continue
+            candidate = (repo_root() / raw).resolve()
+            try:
+                candidate.relative_to(repo_root().resolve())
+            except ValueError:
+                # Reads were not containment-checked while writes were, so an
+                # ansible.cfg could point the agent at any YAML on the machine.
+                return None
+            return candidate
     return None
 
 
@@ -162,6 +170,45 @@ _GROUP_VARS_CANDIDATES = (
     "ansible/group_vars/all.yaml",
     "ansible/group_vars/all/main.yml",
 )
+
+
+def _defined_for_all(var: str, hosts: list[str], narrow: dict[str, str]) -> bool:
+    """True if every host in ``hosts`` sees ``var`` from a narrow vars file.
+
+    Without this the check fired on a variable that *is* defined for every host
+    the play targets, and the message it printed — "not for every host this play
+    targets" — stated a fact nothing had computed.
+    """
+    if not hosts:
+        return False
+    inventory = _load_yaml(inventory_path())
+    _, groups = _inventory_index(inventory)
+    for host in hosts:
+        covered = False
+        for rel in (f"ansible/host_vars/{host}.yml", f"ansible/host_vars/{host}.yaml"):
+            path = repo_root() / rel
+            if path.is_file():
+                try:
+                    if var in _load_yaml(path):
+                        covered = True
+                except InputUnreadable:
+                    pass
+        if not covered:
+            for group, members in groups.items():
+                if host not in members:
+                    continue
+                for rel in (f"ansible/group_vars/{group}.yml",
+                            f"ansible/group_vars/{group}.yaml"):
+                    path = repo_root() / rel
+                    if path.is_file():
+                        try:
+                            if var in _load_yaml(path):
+                                covered = True
+                        except InputUnreadable:
+                            pass
+        if not covered:
+            return False
+    return True
 
 
 def _load_narrow_vars() -> dict[str, str]:
@@ -192,7 +239,7 @@ def _load_narrow_vars() -> dict[str, str]:
 
 
 def _load_group_vars() -> dict:
-    """Every variable Ansible would see from group_vars and host_vars.
+    """Variables that apply to every host: ``group_vars/all*`` only.
 
     Only ``group_vars/all*`` used to be read, so a variable defined in
     ``group_vars/webservers.yml`` or ``host_vars/web-01.yml`` looked undefined
@@ -247,6 +294,11 @@ def _plays_tasks(play: dict, source: str) -> list[dict]:
         if not isinstance(task, dict):
             raise InputUnreadable(
                 f"{source}: a task is a {type(task).__name__}, not a mapping")
+        name = task.get("name")
+        if name is not None and not isinstance(name, (str, int, float, bool)):
+            # An unhashable name reached a dict key and raised TypeError.
+            raise InputUnreadable(
+                f"{source}: a task `name:` is a {type(name).__name__}, not text")
     return tasks
 
 
@@ -278,7 +330,12 @@ def _expand_playbook(playbook_path: Path, _seen: frozenset[Path] = frozenset()) 
     expanded: list[dict] = []
     for entry in raw:
         if isinstance(entry, dict) and "import_playbook" in entry:
-            sub_path = playbook_path.parent / entry["import_playbook"]
+            target = entry["import_playbook"]
+            if not isinstance(target, str):
+                raise InputUnreadable(
+                    f"{_rel(playbook_path)}: import_playbook is a "
+                    f"{type(target).__name__}, not a path")
+            sub_path = playbook_path.parent / target
             for sub in _expand_playbook(sub_path, _seen):
                 expanded.append(sub)
         elif isinstance(entry, dict):
@@ -400,7 +457,11 @@ def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
     # Group names are global in Ansible: `prod: {children: {webservers: {}}}`
     # refers to the same `webservers` defined elsewhere in the file. Resolving
     # by tree position alone left such a parent with zero hosts.
-    for _ in range(len(groups)):
+    # Iterate BOTH relations to a fixpoint together. Running the _group_refs
+    # pass once, after the other loop, resolved one level of indirection and
+    # stopped: a grandparent whose child group was defined elsewhere in the
+    # file still came out empty.
+    for _ in range(len(groups) + len(_group_refs) + 1):
         changed = False
         for parent, members in list(groups.items()):
             for name in list(members):
@@ -409,13 +470,15 @@ def _inventory_index(inv: dict) -> tuple[dict[str, dict], dict[str, list[str]]]:
                         if host not in members:
                             members.append(host)
                             changed = True
+        for parent, refs in list(_group_refs.items()):
+            bucket = groups.setdefault(parent, [])
+            for ref in refs:
+                for host in groups.get(ref, []):
+                    if host not in bucket:
+                        bucket.append(host)
+                        changed = True
         if not changed:
             break
-    for parent, refs in list(_group_refs.items()):
-        for ref in refs:
-            for host in groups.get(ref, []):
-                if host not in groups.setdefault(parent, []):
-                    groups[parent].append(host)
 
     return flat, {g: list(dict.fromkeys(h)) for g, h in groups.items()}
 
@@ -473,6 +536,10 @@ def _hosts_in_inventory(inv: dict, pattern) -> list[str] | None:
     matched: list[str] = []
     excluded: set[str] = set()
     intersections: list[set[str]] = []
+    # Ansible starts from every host when a pattern opens with an exclusion or
+    # an intersection: `!web-01` means "all except web-01", not "nothing".
+    if parts and parts[0][:1] in ("!", "&"):
+        matched.extend(flat.keys())
     for part in parts:
         if part.startswith("!"):
             excluded.update(resolve(part[1:]))
@@ -506,13 +573,21 @@ def _check_removed_modules(task: dict) -> str | None:
 
 
 def _collect_template_vars(task: dict) -> list[str]:
-    """Return list of undefined-var refs inside the task's template vars block."""
-    refs = []
-    tpl = task.get("template") or task.get("ansible.builtin.template")
-    if isinstance(tpl, dict):
-        raw = yaml.safe_dump(tpl.get("vars", {}))
-        refs.extend(re.findall(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}", raw))
-    return refs
+    """Every ``{{ var }}`` reference anywhere in the task.
+
+    This used to look only inside ``task["template"]["vars"]`` — a `vars:` key
+    nested *within* the module arguments, which is the one shape ansible-core
+    rejects outright ("Unsupported parameters for (copy) module: vars"). So the
+    only form it detected was a form that cannot run, and every correct way of
+    referencing a variable was invisible: the runner reported exit 0 on
+    playbooks `ansible-playbook` exits 2 on.
+    """
+    try:
+        raw = yaml.safe_dump(task, default_flow_style=False)
+    except yaml.YAMLError:
+        raw = str(task)
+    found = re.findall(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*[|}]", raw)
+    return list(dict.fromkeys(found))
 
 
 def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
@@ -599,8 +674,15 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
             refs = _collect_template_vars(task)
             undefined = [r for r in refs if r not in defined]
             if undefined:
-                rc = 2
                 var = undefined[0]
+                play_hosts = _hosts_in_inventory(inv, target) or []
+                if var in narrow_vars and _defined_for_all(
+                        var, play_hosts, narrow_vars):
+                    # Defined for every host this play targets. Not a failure,
+                    # so the exit code must not be set either — doing that
+                    # before the check reported a red run with no failures in it.
+                    continue
+                rc = 2
                 if var in narrow_vars:
                     # Defined, but only for some hosts. Adding a global default
                     # would change behaviour for every other host, and calling
@@ -687,7 +769,11 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
                     # "is this one stale hostname?" guard has to see this, not
                     # the post-split fragment — checking the fragment meant a
                     # pattern the runner had already mangled sailed through.
-                    "raw_pattern": target if isinstance(target, str) else str(target),
+                    # A YAML list carries its own element, not the repr of the
+                    # list: str(["web-server-01"]) is "['web-server-01']", which
+                    # the guard then refused for containing brackets, making a
+                    # single-element list permanently unhealable.
+                    "raw_pattern": part if not isinstance(target, str) else target,
                     "message": f"UNREACHABLE! fatal: [{fake_host}]: UNREACHABLE! "
                                f"Host '{fake_host}' not found in inventory.",
                     "playbook": play_source,

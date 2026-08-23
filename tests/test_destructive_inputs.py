@@ -33,6 +33,18 @@ def _write(repo: Path, rel: str, content: str) -> None:
     path.write_text(textwrap.dedent(content).lstrip("\n"))
 
 
+def _play(hosts: str) -> str:
+    return f"""
+        - name: P
+          hosts: {hosts}
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """
+
+
 def _needs_var(hosts: str = "web-01") -> str:
     return f"""
         - name: P
@@ -299,14 +311,13 @@ def test_a_variable_named_hosts_does_not_invent_a_group(repo):
 
 # ── variables the operator has already defined ──────────────────────
 
-def test_a_variable_defined_for_only_some_hosts_is_neither_overwritten_nor_ignored(repo):
-    """`group_vars/webservers.yml` defines it; `group_vars/all.yml` does not.
+def test_a_group_var_covering_every_targeted_host_is_simply_defined(repo):
+    """`group_vars/webservers.yml` covers web-01, and the play targets web-01.
 
-    Two wrong answers were available and the agent has given both. Writing a
-    global default overrides the operator's per-group value for every other
-    host. Merging every vars file into one namespace and calling the run green
-    hides a play that genuinely fails on a host the variable was not defined
-    for. The honest answer is to say which file defines it and stop.
+    The variable IS defined for every host in scope, so there is nothing to
+    report. An earlier version fired a "defined for only some hosts" refusal
+    here — on a global name→file map that was never intersected with the play's
+    host set, so the message stated a fact nothing had computed.
     """
     _write(repo, "ansible/group_vars/webservers.yml", "nginx_port: 9443\n")
     _write(repo, "ansible/playbooks/site.yml", _needs_var())
@@ -314,19 +325,27 @@ def test_a_variable_defined_for_only_some_hosts_is_neither_overwritten_nor_ignor
 
     result = heal(max_retries=3, use_llm=False)
 
+    assert result.success, result.declined
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
-    assert not result.success
-    assert any("webservers.yml" in d for d in result.declined), result.declined
 
 
-def test_a_variable_defined_in_host_vars_is_treated_the_same_way(repo):
+def test_a_variable_defined_for_only_some_targeted_hosts_is_neither_overwritten_nor_ignored(repo):
+    """host_vars/web-01.yml defines it; the play targets web-01 AND web-02.
+
+    Two wrong answers are available and the agent has given both. Writing a
+    global default overrides the operator's per-host value for everyone else.
+    Merging every vars file into one namespace and calling the run green hides
+    a play that genuinely fails on web-02. The honest answer is to name the
+    file and stop.
+    """
     _write(repo, "ansible/host_vars/web-01.yml", "nginx_port: 9443\n")
-    _write(repo, "ansible/playbooks/site.yml", _needs_var())
+    _write(repo, "ansible/playbooks/site.yml", _needs_var("all"))
     before = (repo / "ansible" / "group_vars" / "all.yml").read_text()
 
     result = heal(max_retries=3, use_llm=False)
 
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
+    assert not result.success
     assert any("web-01.yml" in d for d in result.declined), result.declined
 
 
@@ -591,3 +610,196 @@ def test_the_words_vault_in_a_comment_do_not_block_a_patch(repo):
     result = heal(max_retries=3, use_llm=False)
 
     assert result.success, result.declined
+
+
+# ── the operator's other work in the same repository ────────────────
+
+def test_a_subdirectory_target_does_not_sweep_the_parent_index(tmp_path, monkeypatch):
+    """`git commit` with no pathspec commits the WHOLE index.
+
+    Pointing the agent at a subdirectory of a repository makes it operate on
+    that repository's index, so an operator with staged work in progress got it
+    committed under a subject claiming to be an Ansible fix.
+    """
+    from agent import config
+    from scenarios import seed
+
+    root = tmp_path / "proj"
+    (root / "app").mkdir(parents=True)
+    infra = root / "infra"
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=root, check=True)
+    for k, v in (("user.email", "t@e.invalid"), ("user.name", "T")):
+        subprocess.run(["git", "config", k, v], cwd=root, check=True)
+    (root / "app" / "secrets.py").write_text("PASSWORD=original\n")
+    for name, body in seed.baseline_files().items():
+        path = infra / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "initial")
+
+    (root / "app" / "secrets.py").write_text("PASSWORD=work-in-progress\n")
+    _git(root, "add", "app/secrets.py")
+
+    monkeypatch.setattr(config, "_OVERRIDE", infra.resolve())
+    heal(max_retries=3, use_llm=False)
+
+    agent_commits = _git(root, "log", "--format=%H", "--grep", "fix(").split()
+    for sha in agent_commits:
+        touched = _git(root, "show", "--stat", "--format=", sha)
+        assert "app/" not in touched, f"{sha[:8]} committed the operator's work"
+    assert "app/secrets.py" in _git(root, "diff", "--cached", "--name-only"), \
+        "the operator's staged work was taken out of the index"
+
+
+def test_a_bare_repository_is_recognised(tmp_path):
+    """`--is-inside-work-tree` is false in a bare repo, so it read as "not a
+    repository" and got a shadow `.git` inside it — masking every ref from
+    anything that cloned the path afterwards."""
+    from agent import config
+    from pipeline import git_helper
+
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=src, check=True)
+    for k, v in (("user.email", "t@e.invalid"), ("user.name", "T")):
+        subprocess.run(["git", "config", k, v], cwd=src, check=True)
+    (src / "prod.txt").write_text("important\n")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-m", "p")
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(src), str(bare)], check=True)
+
+    with config.repo_root_override(bare):
+        git_helper.init_if_needed()
+
+    assert not (bare / ".git").exists(), "created a shadow repository"
+    check = tmp_path / "check"
+    subprocess.run(["git", "clone", "-q", str(bare), str(check)], check=True)
+    assert (check / "prod.txt").is_file(), "history was masked"
+
+
+# ── patterns, once more ─────────────────────────────────────────────
+
+def test_an_ipv6_literal_with_an_ipv4_tail_is_treated_as_ambiguous(repo):
+    """`fd00::21:10.0.0.5` is BOTH a valid IPv6 literal and a union of two
+    patterns. Ansible reads it as the union. The IPv6 check added to stop the
+    previous round's damage said "one hostname" and a live host was renamed
+    away on a repo Ansible runs correctly."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          hosts:
+            "fd00::21": {}
+            "10.0.0.5": {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: "fd00::21:10.0.0.5"
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    before = (repo / "ansible" / "inventory.yml").read_text()
+
+    result = heal(max_retries=3, use_llm=False)
+
+    assert (repo / "ansible" / "inventory.yml").read_text() == before
+    assert any("ambiguous" in d for d in result.declined), result.declined
+
+
+def test_a_single_element_list_pattern_still_heals(repo):
+    """The raw pattern was stringified from the whole list, so a one-element
+    list arrived as "['web-server-01']" and was refused for its brackets."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            g:
+              hosts:
+                web-01: {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts:
+            - web-server-01
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: ok
+    """)
+    result = heal(max_retries=3, use_llm=False)
+
+    assert result.success, result.declined
+    assert "web-server-01" in (repo / "ansible" / "inventory.yml").read_text()
+
+
+def test_a_lone_exclusion_means_everything_else(repo):
+    """`!web-01` is "all except web-01", not "nothing"."""
+    _write(repo, "ansible/playbooks/site.yml", _play("'!web-01'"))
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+    assert result.succeeded_hosts == ["web-02"]
+
+
+def test_group_indirection_resolves_more_than_one_level(repo):
+    """The indirection pass ran once, after the other loop, so a grandparent
+    whose child group was defined elsewhere still came out empty."""
+    _write(repo, "ansible/inventory.yml", """
+        all:
+          children:
+            webservers:
+              hosts:
+                web-01: {}
+            dc:
+              children:
+                prod: {}
+            prod:
+              children:
+                webservers: {}
+    """)
+    _write(repo, "ansible/playbooks/site.yml", _play("dc"))
+    result = runner.run_pipeline(repo / "ansible" / "playbooks" / "site.yml")
+    assert result.exit_code == 0, result.failures
+    assert result.succeeded_hosts == ["web-01"]
+
+
+def test_an_ordinary_variable_reference_is_detected(repo):
+    """The undefined-variable check looked only inside `template: vars:` — a
+    key nested in the module arguments, which is the one shape ansible-core
+    rejects outright. Every correct way of referencing a variable was invisible,
+    so the runner reported exit 0 on playbooks `ansible-playbook` exits 2 on."""
+    _write(repo, "ansible/playbooks/site.yml", """
+        - name: P
+          hosts: web-01
+          gather_facts: false
+          tasks:
+            - name: t
+              ansible.builtin.debug:
+                msg: "listen {{ nginx_port }}"
+    """)
+    result = heal(max_retries=3, use_llm=False)
+
+    assert result.success
+    assert "nginx_port" in (repo / "ansible" / "group_vars" / "all.yml").read_text()
+
+
+def test_ansible_core_is_consulted_before_an_inventory_is_edited(repo, monkeypatch):
+    """The destructive step asks the authority rather than trusting the sim.
+
+    Six audit rounds found the same shape of bug: the bundled simulator fails
+    to match some ordinary Ansible construct, and this diagnoser reads "no
+    match" as "the inventory is wrong". Patching the simulator construct by
+    construct never converged, so the rename is now gated on ansible-core's own
+    answer where ansible-core is available.
+    """
+    from agent import diagnoser
+
+    monkeypatch.setattr(diagnoser, "ansible_resolves", lambda pattern: True)
+    diag = diagnoser.fallback_diagnose(
+        {"type": "no_hosts_matched", "pattern": "web-server-01",
+         "host": "web-server-01", "raw_pattern": "web-server-01"})
+
+    assert diag["fix"]["action"] == "none"
+    assert "ansible-core resolves" in diag["_no_fix_reason"]
