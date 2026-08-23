@@ -154,6 +154,35 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
 
 # ── deterministic rules ─────────────────────────────────────────────
 
+#: Characters that make a `hosts:` value a *pattern* rather than a hostname:
+#: separators, exclusion, intersection, ranges, regex and globs.
+_PATTERN_METACHARACTERS = set(":!&[]*~,;")
+
+
+def _not_a_single_hostname(expected: str) -> str | None:
+    """Why ``expected`` cannot be treated as one stale hostname, or None."""
+    text = str(expected).strip()
+    if not text:
+        return "the failing play has an empty hosts: pattern; Ansible rejects that outright"
+    if text.lower() == "localhost":
+        return ("'localhost' is always available to Ansible implicitly; a play "
+                "targeting it does not need an inventory entry, and renaming a "
+                "real host to 'localhost' would redirect every later "
+                "localhost play at that machine")
+    if text in ("all", "*"):
+        return (f"'{text}' matches every host; that it matched none means the "
+                f"inventory is empty, which renaming cannot fix")
+    if any(c.isspace() for c in text):
+        return (f"{text!r} is a multi-host pattern (Ansible splits on "
+                f"whitespace); it is not a hostname to rename to")
+    bad = sorted(_PATTERN_METACHARACTERS & set(text))
+    if bad:
+        return (f"{text!r} is an Ansible pattern, not a hostname "
+                f"(contains {''.join(bad)!r}); renaming an inventory entry to "
+                f"it would create a host that no pattern resolves to")
+    return None
+
+
 def _play_host_patterns() -> dict[str, str]:
     """Every ``hosts:`` pattern in the repo's playbooks, mapped to its file.
 
@@ -195,11 +224,35 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
     if not expected:
         return _no_fix("failure did not name the host pattern that failed")
 
+    # Renaming an inventory entry is only defensible when the thing that failed
+    # to match is unambiguously one stale hostname. Everything below is a case
+    # where it is not, and where renaming destroyed a working repository:
+    # a multi-host pattern became a host literally called "web-01 db-01"; a
+    # group name became a host colliding with the group; localhost, which
+    # Ansible always provides implicitly, was repointed at a remote address.
+    unambiguous = _not_a_single_hostname(expected)
+    if unambiguous:
+        return _no_fix(unambiguous)
+
     inventory = _read(_INVENTORY)
     if inventory is None:
         return _no_fix(f"no inventory at {_INVENTORY} to reconcile against")
 
-    hosts = yaml_edit.inventory_hosts(inventory)
+    try:
+        hosts = yaml_edit.inventory_hosts(inventory)
+    except Exception as e:
+        # An INI inventory, or YAML this editor cannot round-trip. Ansible may
+        # well read it fine; the agent simply cannot edit it safely.
+        return _no_fix(
+            f"cannot parse {_INVENTORY} well enough to edit it safely: {e}")
+
+    groups = yaml_edit.inventory_groups(inventory) if hasattr(
+        yaml_edit, "inventory_groups") else set()
+    if expected in groups:
+        return _no_fix(
+            f"'{expected}' is a group in {_INVENTORY}, not a host. Renaming a "
+            f"host to match it would create a group/host name collision; the "
+            f"group is more likely empty or dynamically populated")
     if expected in hosts:
         return _no_fix(
             f"'{expected}' is already in the inventory; the failure is not a "
@@ -213,6 +266,11 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
             f"guess, so no fix is proposed")
 
     stale = matches[0]
+    if stale in groups:
+        return _no_fix(
+            f"the closest inventory name to '{expected}' is the group "
+            f"'{stale}'; renaming a group is not a host fix")
+
     claimed_by = _play_host_patterns().get(stale)
     if claimed_by:
         return _no_fix(

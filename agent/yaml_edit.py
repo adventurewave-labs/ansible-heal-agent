@@ -167,6 +167,40 @@ def inventory_hosts(text: str) -> list[str]:
     return found
 
 
+def inventory_groups(text: str) -> set[str]:
+    """Every group name in an inventory document.
+
+    Needed so the diagnoser never renames a host to match a *group* pattern —
+    an empty group (a scaled-to-zero tier, a dynamic-inventory placeholder)
+    makes Ansible skip the play and exit 0, and "fixing" it by renaming the
+    nearest host both deletes that host and creates a group/host collision.
+    """
+    data = load(text)
+    groups: set[str] = set()
+
+    def walk(node, inside_group_container: bool):
+        if not isinstance(node, dict):
+            return
+        for k, v in node.items():
+            if k in ("hosts", "vars"):
+                continue
+            if k == "children" and isinstance(v, dict):
+                for name, child in v.items():
+                    groups.add(str(name))
+                    walk(child, False)
+            elif isinstance(v, dict):
+                # A mapping that carries hosts/children/vars is a group.
+                if any(key in v for key in ("hosts", "children", "vars")):
+                    groups.add(str(k))
+                walk(v, False)
+
+    if isinstance(data, dict):
+        for top, node in data.items():
+            groups.add(str(top))
+            walk(node, True)
+    return groups
+
+
 def rename_host(text: str, old: str, new: str) -> str:
     """Rename a host key in an inventory, preserving its position and vars."""
     data = load(text)
