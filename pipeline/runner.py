@@ -331,6 +331,15 @@ def _load_group_vars() -> dict:
         if path.is_file():
             merged.update(_load_yaml(path))
             break
+    # `group_vars/all/` may hold any number of files, not just main.yml.
+    all_dir = repo_root() / "ansible" / "group_vars" / "all"
+    if all_dir.is_dir():
+        for path in sorted(all_dir.rglob("*")):
+            if path.is_file() and path.suffix in (".yml", ".yaml"):
+                try:
+                    merged.update(_load_yaml(path))
+                except InputUnreadable:
+                    continue
     return merged
 
 
@@ -716,7 +725,9 @@ def _role_defined_names() -> set[str]:
     defaults, so it *overrides* a working value with a fabricated one.
     """
     names: set[str] = set()
-    for base in (repo_root() / "ansible" / "roles", repo_root() / "roles"):
+    bases = [repo_root() / "ansible" / "roles", repo_root() / "roles",
+             repo_root() / "ansible" / "playbooks" / "roles"]
+    for base in bases:
         if not base.is_dir():
             continue
         for path in base.rglob("*.yml"):
@@ -786,7 +797,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
 
     rc = 0
 
-    # ── Phase A: parse-time validation ─────────────────────────────────────
+    # ── Phase A: parse-time validation ────────────────────────────────────
     parse_failures_by_task: dict[tuple[str, str], list[dict]] = {}
     for play in playbook:
         target = play.get("hosts", "all")
@@ -886,7 +897,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     log_lines.append("PHASE B: Runtime execution")
     log_lines.append("")
 
-    # ── Phase B: runtime execution ───────────────────────────────────────
+    # ── Phase B: runtime execution ───────────────────────────────────
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
