@@ -146,9 +146,11 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
             result.decline(blocker)
             result.push_error = blocker
             return result
-        # Snapshot the working tree before anything is written, so a file the
-        # operator had already modified is never folded into an agent commit.
-        committer.note_preexisting_changes()
+        # Clear the previous run's record of what it confirmed clean before
+        # writing — otherwise a resolved path from an earlier run/repo could
+        # be trusted for this one, if it happens to resolve to the same
+        # absolute path.
+        git_helper.reset_write_tracking()
         # One writer per repository: git's index is a single shared file, and
         # two concurrent runs interleaved add/commit badly enough that one
         # run's staged edit landed inside the other's commit.
@@ -192,11 +194,16 @@ def _diagnose_and_patch(failure: dict, use_llm: bool, transcript: Transcript | N
     fix = diag.get("fix", {})
     target = fix.get("target_file")
     if (target and not dry_run
-            and git_helper.was_dirty(committer.resolved_target(str(target)))):
+            and git_helper.check_and_note_clean(committer.resolved_target(str(target)))):
         # Refuse before apply_fix(), not after. Checking at commit time left the
         # operator's work-in-progress already overwritten by the agent's edit,
         # with the refusal telling them to stash — which would have discarded
-        # both changes together, with nothing separating them.
+        # both changes together, with nothing separating them. The check is
+        # live, right here, rather than against a snapshot taken when the run
+        # started: a run can span minutes, and an edit made after the
+        # snapshot but before the agent reached this file needs to be caught
+        # now, not missed because it happened after the one moment a
+        # run-start snapshot looked.
         reason = (f"{target} has uncommitted changes; the agent will not edit a "
                   f"file you are in the middle of. Commit or stash them and "
                   f"re-run")
@@ -537,7 +544,7 @@ def _open_pull_request(branch: str, base: str, rec: IterationRecord) -> str | No
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
 
 
-# ── Transcript writer ──────────────────────────────────────────────
+# ── Transcript writer ─────────────────────────────────────────
 
 class Transcript:
     """Append-only Markdown transcript writer used by the heal loop."""

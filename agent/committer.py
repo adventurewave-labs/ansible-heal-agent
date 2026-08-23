@@ -35,11 +35,6 @@ def commit_fix(fix: dict[str, Any], diagnosis: dict[str, Any]) -> str:
     return git_helper.commit(msg, pathspec=staged)
 
 
-def note_preexisting_changes() -> None:
-    """Record which files were already modified, before the agent touches any."""
-    git_helper.snapshot_dirty()
-
-
 def resolved_target(target: str) -> str:
     """Public alias — core checks the same path the committer will stage."""
     return _resolved_target(target)
