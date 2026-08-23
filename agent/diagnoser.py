@@ -22,7 +22,7 @@ import os
 import re
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -142,7 +142,7 @@ def _no_fix(reason: str, ftype: str = "other") -> dict[str, Any]:
     }
 
 
-# ── LLM path ───────────────────────────────────────────────────────
+# ── LLM path ──────────────────────────────────────────────────────
 
 def _load_context(failure: dict, root: Path) -> str:
     """Load the files most relevant to this failure."""
@@ -166,7 +166,7 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
     return llm.chat_json(prompt, system=SYSTEM_PROMPT)
 
 
-# ── deterministic rules ─────────────────────────────────────────────
+# ── deterministic rules ────────────────────────────────────────────
 
 #: Characters that make a `hosts:` value a *pattern* rather than a hostname:
 #: separators, exclusion, intersection, ranges, regex and globs.
@@ -218,6 +218,51 @@ def _not_a_single_hostname(expected: str) -> str | None:
     return None
 
 
+#: ansible-core's own words when a source did not parse. Any of these means the
+#: probe saw less than a real run would, so its "that host does not exist" is
+#: not an answer — it is the absence of one.
+_NO_INVENTORY_RE = re.compile(
+    r"No inventory was parsed"
+    r"|Unable to parse .*as an inventory source"
+    r"|Failed to parse inventory"
+    r"|Failed to parse .*with .* plugin"
+    r"|skipping inventory source", re.I)
+
+
+#: Suffixes the probe's restricted plugin set can actually read.
+_PARSEABLE_SUFFIXES = {".yml", ".yaml", ".ini", ".toml", ""}
+
+
+def _unparseable_sources_configured() -> bool:
+    """Does this repo point Ansible at an inventory source the probe cannot read?
+
+    An executable script, a directory of sources, or a plugin config file. Any
+    of those means ansible-core sees hosts the probe does not.
+    """
+    sources: list[str] = []
+    env_inventory = os.environ.get("ANSIBLE_INVENTORY", "")
+    if env_inventory:
+        sources.extend(env_inventory.split(","))
+    try:
+        from pipeline.runner import configured_inventory_sources
+        sources.extend(configured_inventory_sources())
+    except Exception:
+        pass
+    for raw in sources:
+        entry = raw.strip()
+        if not entry:
+            continue
+        path = (repo_root() / entry)
+        if path.is_dir():
+            return True
+        if path.is_file():
+            if path.suffix.lower() not in _PARSEABLE_SUFFIXES:
+                return True
+            if os.access(path, os.X_OK):
+                return True
+    return False
+
+
 def ansible_resolves(pattern: str) -> bool | None:
     """Does real Ansible match ``pattern`` against the repo's inventory?
 
@@ -251,7 +296,10 @@ def ansible_resolves(pattern: str) -> bool | None:
     env = {
         **os.environ,
         "ANSIBLE_LOCALHOST_WARNING": "False",
-        "ANSIBLE_INVENTORY_UNPARSED_WARNING": "False",
+        # ANSIBLE_INVENTORY_UNPARSED_WARNING is deliberately NOT set: that
+        # warning is how the probe tells "parsed your inventory, host absent"
+        # from "parsed nothing at all", and only the first authorises deleting
+        # a host. Suppressing it made an empty repo look like a definitive no.
         "ANSIBLE_INVENTORY_ENABLED": "yaml,ini,toml,host_list",
         "ANSIBLE_INVENTORY_PLUGINS": str(repo_root() / ".ansible-heal-no-plugins"),
         "ANSIBLE_RETRY_FILES_ENABLED": "False",
@@ -283,12 +331,63 @@ def ansible_resolves(pattern: str) -> bool | None:
         match = re.search(r"hosts \((\d+)\)", proc.stdout)
         if match is None:
             continue
+        combined = proc.stdout + proc.stderr
+        if _unparseable_sources_configured():
+            # The probe deliberately runs without the script, auto and
+            # constructed plugins, because those execute code the target repo
+            # supplies. A repo that uses one of them therefore shows the probe
+            # fewer hosts than a real run has, and "hosts (0)" from a partial
+            # view is not evidence that a host is absent — it is how a live
+            # host in a dynamic source got renamed away.
+            return None
+        if _NO_INVENTORY_RE.search(combined):
+            # ansible-core exits 0 and prints "hosts (0)" when it parsed no
+            # inventory at all — indistinguishable, by the number alone, from
+            # "parsed it, that host is absent". Only the second is grounds for
+            # deleting a host. This probe disables script/auto/constructed
+            # plugins deliberately (they are code the target repo supplies), so
+            # a dynamic inventory lands here every time.
+            continue
         answered = True
         if int(match.group(1)) > 0:
             return True
     # "No definitive answer" must stay None. Collapsing it to False would let a
     # probe that merely failed to run authorise the rename it exists to block.
     return False if answered else None
+
+
+def module_resolves(module: str) -> bool | None:
+    """Does ansible-core resolve ``module``? None if it cannot be asked.
+
+    The simulator declares `apt_key` removed. It is not — it resolves on 2.19
+    — so the agent was rewriting working playbooks autonomously: a key *import*
+    became a file *download*, dropping `id:` and `state:`, on a repo where
+    nothing was broken. A modernisation is a change the operator chooses, not
+    one an autonomous agent applies to a green pipeline.
+    """
+    exe = shutil.which("ansible-doc")
+    if not exe or not module or module.startswith("-"):
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, "-t", "module", "-j", module], cwd=str(repo_root()),
+            capture_output=True, text=True, timeout=30, start_new_session=True,
+            env={**os.environ, "ANSIBLE_DEPRECATION_WARNINGS": "False"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    # ansible-doc exits 0 either way and says so in the payload: a module it
+    # cannot find yields `{}` plus a "was not found" warning. The exit code
+    # alone reported every name as resolvable, including invented ones.
+    if re.search(rf"{re.escape(module)}.{{0,20}}was not found", proc.stdout + proc.stderr):
+        return False
+    try:
+        doc = json.loads(proc.stdout[proc.stdout.index("{"):])
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return bool(doc)
 
 
 def _play_host_patterns() -> dict[str, str]:
@@ -346,6 +445,20 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
                    or _not_a_single_hostname(expected))
     if unambiguous:
         return _no_fix(unambiguous)
+
+    # Only part of the inventory is visible. The agent cannot see a dynamic
+    # source, a directory of sources, or a plugin config — it deliberately does
+    # not execute code the target repo supplies — so it cannot know whether the
+    # host it is about to rename away is defined somewhere it cannot read. It
+    # renamed a live host out of a static file that a dynamic source also
+    # populated, and reported success.
+    if _unparseable_sources_configured():
+        return _no_fix(
+            "this repository's inventory includes a source the agent cannot "
+            "read safely (a dynamic script, a directory, or a plugin), so it "
+            "can see only part of your hosts and will not rename any of them. "
+            "Run with PIPELINE_RUNNER=real for an accurate pipeline result",
+            failure.get("type", "other"))
 
     # Ask ansible-core before touching anything. A "failure" the simulator
     # invented is not grounds for editing someone's inventory.
@@ -461,6 +574,17 @@ def _diagnose_module(failure: dict) -> dict[str, Any]:
     if not module:
         return _no_fix("failure did not name the unresolvable module")
 
+    # Ask ansible-core, exactly as the host rename does. The simulator declares
+    # apt_key removed; ansible-core resolves it, so acting on the simulator here
+    # rewrote working playbooks — a key import became a file download, dropping
+    # `id:` and `state:`. Migrating a module that still works is a change the
+    # operator chooses, not one an autonomous agent makes to a green pipeline.
+    if module_resolves(module) is True:
+        return _no_fix(
+            f"ansible-core resolves '{module}', so the play is not broken. It "
+            f"may still be worth modernising, but that is a change to make "
+            f"deliberately, not a repair")
+
     short = module.rsplit(".", 1)[-1]
     replacement = MODULE_REPLACEMENTS.get(short)
     if replacement is None:
@@ -532,6 +656,25 @@ def fallback_diagnose(failure: dict) -> dict[str, Any]:
     return rule(failure)
 
 
+def _is_inventory_target(target: str) -> bool:
+    """Does this path point at an inventory, however it is spelled?
+
+    `./ansible/hosts.yml`, `ansible//inventory.yml` and a second inventory file
+    under `ansible/inventory/` all reach the patcher, which normalises them —
+    so a comparison against one exact string let a rewrite through unchecked.
+    """
+    if not target:
+        return False
+    normalised = PurePosixPath(target.replace("\\", "/")).as_posix()
+    normalised = normalised.removeprefix("./")
+    if normalised == _inventory_rel():
+        return True
+    name = PurePosixPath(normalised).name.lower()
+    parts = {p.lower() for p in PurePosixPath(normalised).parts}
+    return ("inventory" in name or "hosts" in name
+            or "inventory" in parts or "inventories" in parts)
+
+
 def _guard_inventory_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, Any]:
     """Apply the host-rename guards to a diagnosis from any source.
 
@@ -548,13 +691,32 @@ def _guard_inventory_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, 
         return diagnosis
 
     target = str(fix.get("target_file") or "")
-    touches_inventory = target == _inventory_rel() or target.endswith("inventory.yml")
-    if not touches_inventory and fix.get("action") != "rename_host":
+    if not _is_inventory_target(target) and fix.get("action") != "rename_host":
         return diagnosis
+
+    # An `edit_file` fix — the shape PROMPT_TEMPLATE actually asks the model for
+    # — carries `search`/`replace`, not `old`/`new`. Every content check below
+    # reads old/new, so for the shape the agent itself requests they all
+    # short-circuited and an arbitrary string replacement landed on the
+    # inventory: a host nothing had diagnosed was deleted as collateral inside
+    # a replace span, and the guard approved it. A free-text rewrite of an
+    # inventory is not something this agent can validate, so it is not allowed
+    # to make one.
+    if fix.get("action") not in ("rename_host", "none"):
+        return _no_fix(
+            f"a {fix.get('action')!r} fix targeting {target} would rewrite the "
+            f"inventory as free text; only a checked host rename is permitted "
+            f"there", failure.get("type", "other"))
 
     as_written = failure.get("raw_pattern") or failure.get("pattern") or failure.get("host")
     if not as_written:
         return diagnosis
+
+    if _unparseable_sources_configured():
+        return _no_fix(
+            "this repository's inventory includes a source the agent cannot "
+            "read safely, so it can see only part of your hosts and will not "
+            "rename any of them", failure.get("type", "other"))
 
     reason = _not_a_single_hostname(str(as_written))
     if reason:

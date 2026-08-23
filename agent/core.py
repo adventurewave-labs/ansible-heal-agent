@@ -124,6 +124,9 @@ def heal(playbook: str = "ansible/playbooks/site.yml",
             result.decline(blocker)
             result.push_error = blocker
             return result
+        # Snapshot the working tree before anything is written, so a file the
+        # operator had already modified is never folded into an agent commit.
+        committer.note_preexisting_changes()
         # One writer per repository: git's index is a single shared file, and
         # two concurrent runs interleaved add/commit badly enough that one
         # run's staged edit landed inside the other's commit.
@@ -498,7 +501,7 @@ def _open_pull_request(branch: str, base: str, rec: IterationRecord) -> str | No
     return proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else None
 
 
-# ── Transcript writer ──────────────────────────────────────────────
+# ── Transcript writer ────────────────────────────────────────────
 
 class Transcript:
     """Append-only Markdown transcript writer used by the heal loop."""
