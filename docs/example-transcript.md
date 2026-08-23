@@ -220,3 +220,4 @@ Re-running would produce an identical failure set, so the loop stopped rather th
 ddb7ac0 2026-08-23 fix(playbook): migrate deprecated module to modern equivalent
 19d0a8f 2026-08-23 chore: reset to broken baseline
 ```
+
