@@ -27,6 +27,7 @@ make.
 from __future__ import annotations
 
 import itertools
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -46,7 +47,12 @@ HOST_PAIRS = [
     ("db-primary", "db-primary-01"),
 ]
 
-MODULES = ["apt_key", "docker"]
+# Both of these must be modules ansible-core genuinely cannot resolve. The
+# agent asks `ansible-doc` before migrating anything, and refuses to rewrite a
+# playbook whose module still works — apt_key resolves on 2.19, so migrating it
+# is a modernisation the operator chooses, not a repair, and it no longer
+# belongs in a suite that asserts convergence.
+MODULES = ["docker"]
 
 
 def _seed(repo: Path, *, variable: str, stale: str, expected: str,
@@ -100,6 +106,14 @@ def _seed(repo: Path, *, variable: str, stale: str, expected: str,
         """))
 
 
+    # A fixture must leave a clean tree: the agent refuses to commit a file
+    # that already had uncommitted changes, since `git commit -- <path>` takes
+    # the working-tree state and would fold the operator's work into its own
+    # commit. A half-written fixture is indistinguishable from that.
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "-m", "perturbed baseline"], cwd=repo,
+                   capture_output=True, check=False)
+
 def _assert_healed(repo: Path, variable: str, stale: str, expected: str,
                    module: str) -> None:
     result = heal(playbook="ansible/playbooks/site.yml", max_retries=3,
@@ -127,21 +141,21 @@ def _assert_healed(repo: Path, variable: str, stale: str, expected: str,
         repo / "ansible" / "playbooks" / "site.yml").exit_code == 0
 
 
-# ── one dimension at a time ──────────────────────────────────────────
+# ── one dimension at a time ────────────────────────────────────────────
 
 @pytest.mark.parametrize("variable", VARIABLES)
 def test_heals_any_undefined_variable_name(scratch_repo, variable):
     """The regression that motivated this suite."""
     _seed(scratch_repo, variable=variable, stale="web-01",
-          expected="web-server-01", module="apt_key")
-    _assert_healed(scratch_repo, variable, "web-01", "web-server-01", "apt_key")
+          expected="web-server-01", module="docker")
+    _assert_healed(scratch_repo, variable, "web-01", "web-server-01", "docker")
 
 
 @pytest.mark.parametrize("stale,expected", HOST_PAIRS)
 def test_heals_any_stale_hostname(scratch_repo, stale, expected):
     _seed(scratch_repo, variable="nginx_port", stale=stale,
-          expected=expected, module="apt_key")
-    _assert_healed(scratch_repo, "nginx_port", stale, expected, "apt_key")
+          expected=expected, module="docker")
+    _assert_healed(scratch_repo, "nginx_port", stale, expected, "docker")
 
 
 @pytest.mark.parametrize("module", MODULES)
@@ -151,7 +165,7 @@ def test_heals_any_known_removed_module(scratch_repo, module):
     _assert_healed(scratch_repo, "nginx_port", "web-01", "web-server-01", module)
 
 
-# ── all three varied together ────────────────────────────────────────
+# ── all three varied together ─────────────────────────────────────────
 
 COMBINATIONS = list(itertools.islice(
     zip(itertools.cycle(VARIABLES),

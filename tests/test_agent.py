@@ -18,7 +18,7 @@ def _site(repo: Path) -> Path:
     return repo / "ansible" / "playbooks" / "site.yml"
 
 
-# ── mock runner ───────────────────────────────────────────────────────
+# ── mock runner ───────────────────────────────────────────────────────────
 
 def test_baseline_fails_with_three_failures(scratch_repo):
     result = runner.run_pipeline(_site(scratch_repo))
@@ -48,14 +48,14 @@ def test_runner_goes_green_once_baseline_is_fixed(scratch_repo):
     gv.write_text(gv.read_text() + "\nnginx_port: 8080\n")
     web = scratch_repo / "ansible" / "playbooks" / "webservers.yml"
     web.write_text(web.read_text().replace(
-        "ansible.builtin.apt_key:", "ansible.builtin.get_url:"))
+        "ansible.builtin.docker:", "community.docker.docker_container:"))
 
     result = runner.run_pipeline(_site(scratch_repo))
     assert result.exit_code == 0, result.failures
     assert result.failures == []
 
 
-# ── diagnoser ───────────────────────────────────────────────────────
+# ── diagnoser ─────────────────────────────────────────────────────────
 
 def test_fallback_diagnoser_hostname_change(scratch_repo):
     diag = diagnoser.fallback_diagnose(
@@ -69,14 +69,26 @@ def test_fallback_diagnoser_hostname_change(scratch_repo):
 
 
 def test_fallback_diagnoser_removed_module(scratch_repo):
+    """`docker`, not `apt_key`: the agent asks ansible-doc first and refuses to
+    migrate a module that still resolves, so apt_key no longer reaches here."""
     diag = diagnoser.fallback_diagnose(
-        {"type": "removed_module", "module": "apt_key", "message": "x"})
+        {"type": "removed_module", "module": "docker", "message": "x"})
     assert diag["failure_type"] == "removed_module"
     assert diag["fix"]["action"] == "replace_module"
-    assert diag["fix"]["old_module"] == "apt_key"
-    assert diag["fix"]["new_module"] == "ansible.builtin.get_url"
+    assert diag["fix"]["old_module"] == "docker"
+    assert diag["fix"]["new_module"] == "community.docker.docker_container"
     # The playbook it targets is discovered, not hardcoded.
     assert diag["fix"]["target_file"] == "ansible/playbooks/webservers.yml"
+
+
+def test_a_module_that_still_resolves_is_not_migrated(scratch_repo):
+    """apt_key resolves on ansible-core 2.19. Rewriting a working playbook —
+    a key import became a file download, dropping `id:` and `state:` — is a
+    modernisation the operator chooses, not a repair an agent commits."""
+    diag = diagnoser.fallback_diagnose(
+        {"type": "removed_module", "module": "apt_key", "message": "x"})
+    assert diag["fix"]["action"] == "none"
+    assert "resolves" in diag["_no_fix_reason"]
 
 
 def test_fallback_diagnoser_undefined_var(scratch_repo):
@@ -93,7 +105,7 @@ def test_unknown_failure_type_yields_no_op_fix(scratch_repo):
     assert diag["fix"]["action"] == "none"
 
 
-# ── patcher ────────────────────────────────────────────────────────
+# ── patcher ───────────────────────────────────────────────────────
 
 def test_patcher_applies_hostname_rename(scratch_repo):
     diag = diagnoser.fallback_diagnose(
@@ -135,7 +147,7 @@ def test_patcher_rejects_invalid_yaml_and_does_not_write(scratch_repo):
     assert inv.read_text() == before
 
 
-# ── heal loop ──────────────────────────────────────────────────────
+# ── heal loop ─────────────────────────────────────────────────────
 
 def test_full_heal_loop_with_fallback(scratch_repo, git_log_count):
     from agent.core import heal

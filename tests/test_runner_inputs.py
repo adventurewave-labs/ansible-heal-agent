@@ -26,9 +26,34 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _write(repo: Path, rel: str, content: str) -> None:
+    """Write a fixture file AND commit it.
+
+    Committing matters: the agent refuses to commit a file that already had
+    uncommitted changes, because `git commit -- <path>` takes the working-tree
+    state and would fold the operator's own work into a commit titled as an
+    automated fix. A fixture that leaves files uncommitted is indistinguishable
+    from that, and a real target repository is clean.
+    """
     path = repo / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(content).lstrip("\n"))
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "-m", f"fixture: {rel}"], cwd=repo,
+                   capture_output=True, check=False)
+
+
+def _commit_fixture(repo: Path) -> None:
+    """Commit the fixture's own setup.
+
+    The agent refuses to commit a file that already had uncommitted changes,
+    because `git commit -- <path>` takes the working-tree state and would fold
+    the operator's work into a commit titled as an automated fix. A fixture
+    that writes files without committing them looks exactly like that, so it
+    has to leave a clean tree — which is what a real target repository is.
+    """
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=False)
+    subprocess.run(["git", "commit", "-m", "fixture baseline"], cwd=repo,
+                   capture_output=True, check=False)
 
 
 @pytest.fixture
@@ -45,6 +70,7 @@ def repo(scratch_repo: Path) -> Path:
                 db-01: {}
     """)
     _write(scratch_repo, "ansible/group_vars/all.yml", "---\nenv: prod\n")
+    _commit_fixture(scratch_repo)
     return scratch_repo
 
 
@@ -148,7 +174,7 @@ def test_a_pattern_the_simulator_cannot_parse_is_reported_as_such(repo):
     assert (repo / "ansible" / "inventory.yml").read_text() == before
 
 
-# ── inputs that are absent or malformed ─────────────────────────────
+# ── inputs that are absent or malformed ────────────────────────────
 
 def test_absent_group_vars_is_tolerated_not_fatal(repo):
     """group_vars is optional in Ansible. The runner hard-coded all.yml and
@@ -190,7 +216,7 @@ def test_a_missing_imported_playbook_is_reported_not_raised(repo):
     assert result.failures[0]["type"] == "unreadable_input"
 
 
-# ── variable precedence ─────────────────────────────────────────────
+# ── variable precedence ───────────────────────────────────────────
 
 def test_a_variable_set_on_the_play_is_not_undefined(repo):
     """A play-level `vars:` block satisfies real Ansible.
@@ -218,7 +244,7 @@ def test_a_variable_set_on_the_play_is_not_undefined(repo):
     assert (repo / "ansible" / "group_vars" / "all.yml").read_text() == before
 
 
-# ── file shapes and encodings ───────────────────────────────────────
+# ── file shapes and encodings ────────────────────────────────────
 
 def test_a_fifo_is_refused_rather_than_blocking_forever(repo):
     """Opening a FIFO blocks until a writer appears, which in practice is
