@@ -168,7 +168,7 @@ def _no_fix(reason: str, ftype: str = "other") -> dict[str, Any]:
     }
 
 
-# ── LLM path ───────────────────────────────────────────
+# ── LLM path ───────────────────────────────────────────────────────
 
 def _load_context(failure: dict, root: Path) -> str:
     """Load the files most relevant to this failure."""
@@ -192,7 +192,7 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
     return llm.chat_json(prompt, system=SYSTEM_PROMPT)
 
 
-# ── deterministic rules ──────────────────────────────────
+# ── deterministic rules ─────────────────────────────────────────────
 
 #: Characters that make a `hosts:` value a *pattern* rather than a hostname:
 #: separators, exclusion, intersection, ranges, regex and globs.
