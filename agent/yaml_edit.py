@@ -229,7 +229,7 @@ def rename_host(text: str, old: str, new: str) -> str:
     return dump(data, explicit_start=has_document_start(text))
 
 
-# ── playbook tasks ─────────────────────────────────────────────────
+# ── playbook tasks ──────────────────────────────────────────────────
 
 def _module_keys(task: dict) -> list[str]:
     """Keys of a task dict that name a module (not a directive)."""
