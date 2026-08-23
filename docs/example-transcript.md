@@ -1,13 +1,13 @@
 # Ansible-Heal-Agent — Demo Transcript
 
-- Started: `2026-08-23 03:53:00 UTC`
+- Started: `2026-08-23 05:15:13 UTC`
 - LLM bridge: `disabled` — every diagnosis below is deterministic
 
 ---
 
 ## Iteration 0
 
-- Pipeline run log: `pipeline/runs/run-20260823-035300-iter0.log`
+- Pipeline run log: `pipeline/runs/run-20260823-051513-iter0.log`
 - Exit code: `2`
 - 3 failure(s) detected.
 
@@ -66,7 +66,7 @@
          name: nginx
 ```
 
-- committed: `f0edf968ad92` → `ansible/playbooks/webservers.yml`
+- committed: `5aee2dba78fb` → `ansible/playbooks/webservers.yml`
 
 ### Failure detected
 ```json
@@ -109,7 +109,7 @@
 +nginx_port: 8080
 ```
 
-- committed: `f5a1874c6c99` → `ansible/group_vars/all.yml`
+- committed: `ae9d0dfc2465` → `ansible/group_vars/all.yml`
 
 ### Failure detected
 ```json
@@ -117,6 +117,7 @@
   "type": "unreachable_host",
   "host": "web-server-01",
   "pattern": "web-server-01",
+  "raw_pattern": "web-server-01",
   "message": "UNREACHABLE! fatal: [web-server-01]: UNREACHABLE! Host 'web-server-01' not found in inventory.",
   "playbook": "ansible/playbooks/webservers.yml",
   "play": "Configure webservers"
@@ -155,11 +156,11 @@
          web-02:
 ```
 
-- committed: `14f0e2a8a192` → `ansible/inventory.yml`
+- committed: `15e2ee4ee264` → `ansible/inventory.yml`
 
 ## Iteration 1
 
-- Pipeline run log: `pipeline/runs/run-20260823-035301-iter1.log`
+- Pipeline run log: `pipeline/runs/run-20260823-051513-iter1.log`
 - Exit code: `0`
 - 0 failure(s) detected.
 
@@ -167,7 +168,7 @@
 
 ```
 PLAYBOOK: site.yml ***********************************
-PLAY [configure stack] : started at 2026-08-23 03:53:01
+PLAY [configure stack] : started at 2026-08-23 05:15:13
 
 PHASE A: Parse-time validation
 
@@ -212,9 +213,9 @@ EXIT CODE: 0
 
 ### Recent git log
 ```
-14f0e2a 2026-08-23 fix(inventory): rename host to match playbook expectation
-f5a1874 2026-08-23 fix(vars): add missing variable to group_vars
-f0edf96 2026-08-23 fix(playbook): migrate deprecated module to modern equivalent
-6339615 2026-08-23 chore: reset to broken baseline
+15e2ee4 2026-08-23 fix(inventory): rename host to match playbook expectation
+ae9d0df 2026-08-23 fix(vars): add missing variable to group_vars
+5aee2db 2026-08-23 fix(playbook): migrate deprecated module to modern equivalent
+b122475 2026-08-23 chore: reset to broken baseline
 ```
 

@@ -159,7 +159,9 @@ def inventory_hosts(text: str) -> list[str]:
         if isinstance(node, dict):
             for k, v in node.items():
                 if k == "hosts" and isinstance(v, dict):
-                    found.extend(v.keys())
+                    # YAML turns bare `1234:` into an int and `yes:` into a
+                    # bool. difflib then raised TypeError deep in the diagnoser.
+                    found.extend(str(key) for key in v.keys())
                 elif isinstance(v, dict):
                     walk(v)
 

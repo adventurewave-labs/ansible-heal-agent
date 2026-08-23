@@ -73,6 +73,22 @@ ansible-heal run --repo ~/infra
 
 These are implemented and tested, not planned.
 
+**What the simulator is not.** `pipeline/runner.py` is a simulator, and the
+gap between it and ansible-core is where nearly every destructive bug in this
+repo has come from — it fails to match something ordinary, and a diagnoser
+downstream reads "no match" as "the inventory is wrong". It now implements
+union, `!` exclusion, `&` intersection, `~regex`, `*`/`?` globs, groups nested
+or flat-by-`children`, IPv6 literals, and comma/semicolon/whitespace
+separation, and it refuses to evaluate host ranges (`web-0[1:3]`) rather than
+guessing. Where it still cannot decide, it says so and the agent declines.
+`PIPELINE_RUNNER=real` hands the whole question to ansible-playbook.
+
+One deliberate non-feature: a group mapping placed directly under `all:` is
+**not** treated as a group, because ansible-core skips it (*"Skipping
+unexpected key (webservers) in group (all)"*) and resolves it to zero hosts.
+An earlier round added support for that shape and a test asserting it; both
+were wrong, and a false green is worse than a false failure.
+
 **One writer per repository.** Git's index is a single shared file. Two
 concurrent runs interleaved `add` and `commit` badly enough that one run's
 staged edit landed inside the other's commit, so apply and PR modes take an
@@ -167,7 +183,11 @@ while reporting success:
 - a multi-host pattern — `web-01 db-01`, `web-01,db-01`, a YAML list. These
   resolve properly now; when one cannot, it is not a hostname to rename to
 - `all` or `*` matching nothing, which means the inventory is empty
-- any pattern containing `: ! & [ ] * ~` — those are pattern syntax, not names
+- any pattern containing `! & [ ] * ? ~` — or a `:` that is not part of an
+  IPv6 address. Those are pattern syntax, not names. The check runs on the
+  pattern *as the operator wrote it*, not on a fragment a runner split out of
+  it: `fd00::21` reached the guard as the token `21`, looked like an ordinary
+  hostname, and a real address was renamed to `fd00`
 
 **The repository's own state.**
 
@@ -188,8 +208,13 @@ while reporting success:
 - an inventory host another play still targets, where renaming it would break
   that play
 - a module with no known replacement in `MODULE_REPLACEMENTS`
-- a variable already defined anywhere Ansible would look — `group_vars/all*`,
-  `group_vars/<group>`, `host_vars/`, the play, or the task
+- a variable already defined in `group_vars/all*`, on the play, or on the task
+- a variable defined only in `group_vars/<group>` or `host_vars/` — it names
+  the file and stops. Adding a global default would override the operator's
+  per-host value for every other host, and merging every vars file into one
+  namespace to call the run green hides a play that genuinely fails on a host
+  the variable was never defined for. Both answers are wrong; saying which file
+  defines it is not
 - any failure class it has no rule for
 
 A refusal is a result. `heal()` returns them on `HealResult.declined`, and the
@@ -249,7 +274,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 194 tests
+make test          # 208 tests
 make lint
 ```
 

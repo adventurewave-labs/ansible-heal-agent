@@ -16,6 +16,7 @@ the file it intends to change and works out the edit from what is there.
 from __future__ import annotations
 
 import difflib
+import ipaddress
 import json
 from pathlib import Path
 from typing import Any
@@ -105,7 +106,16 @@ _GROUP_VARS_CANDIDATES = (
     "ansible/group_vars/all/main.yml",
 )
 
-_INVENTORY = "ansible/inventory.yml"
+_DEFAULT_INVENTORY = "ansible/inventory.yml"
+
+
+def _inventory_rel() -> str:
+    """The inventory the run used, repo-relative — ansible.cfg may move it."""
+    try:
+        from pipeline.runner import inventory_path
+        return str(inventory_path().relative_to(repo_root().resolve()))
+    except Exception:
+        return _DEFAULT_INVENTORY
 
 
 def _keyring_name(url: str) -> str:
@@ -132,7 +142,7 @@ def _no_fix(reason: str, ftype: str = "other") -> dict[str, Any]:
 
 def _load_context(failure: dict, root: Path) -> str:
     """Load the files most relevant to this failure."""
-    paths = [_INVENTORY, *_GROUP_VARS_CANDIDATES]
+    paths = [_inventory_rel(), *_GROUP_VARS_CANDIDATES]
     paths += sorted(str(p.relative_to(root))
                     for p in root.glob(_PLAYBOOK_GLOB))
     chunks = []
@@ -156,7 +166,15 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
 
 #: Characters that make a `hosts:` value a *pattern* rather than a hostname:
 #: separators, exclusion, intersection, ranges, regex and globs.
-_PATTERN_METACHARACTERS = set(":!&[]*~,;")
+_PATTERN_METACHARACTERS = set("!&[]*?~,;")
+
+
+def _looks_like_ipv6(text: str) -> bool:
+    try:
+        ipaddress.IPv6Address(text.strip("[]"))
+    except ValueError:
+        return False
+    return True
 
 
 def _not_a_single_hostname(expected: str) -> str | None:
@@ -175,6 +193,11 @@ def _not_a_single_hostname(expected: str) -> str | None:
     if any(c.isspace() for c in text):
         return (f"{text!r} is a multi-host pattern (Ansible splits on "
                 f"whitespace); it is not a hostname to rename to")
+    # ":" unions patterns — except inside an IPv6 literal, which is a hostname.
+    if ":" in text and not _looks_like_ipv6(text):
+        return (f"{text!r} is an Ansible pattern, not a hostname (\':\' unions "
+                f"patterns); renaming an inventory entry to it would create a "
+                f"host that no pattern resolves to")
     bad = sorted(_PATTERN_METACHARACTERS & set(text))
     if bad:
         return (f"{text!r} is an Ansible pattern, not a hostname "
@@ -230,13 +253,18 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
     # a multi-host pattern became a host literally called "web-01 db-01"; a
     # group name became a host colliding with the group; localhost, which
     # Ansible always provides implicitly, was repointed at a remote address.
-    unambiguous = _not_a_single_hostname(expected)
+    # Check the pattern as written, not the fragment a runner split out of it:
+    # `fd00::21` reached this guard as the token `21`, looked like a perfectly
+    # ordinary hostname, and a real IPv6 address was renamed to `fd00`.
+    as_written = failure.get("raw_pattern") or expected
+    unambiguous = (_not_a_single_hostname(as_written)
+                   or _not_a_single_hostname(expected))
     if unambiguous:
         return _no_fix(unambiguous)
 
-    inventory = _read(_INVENTORY)
+    inventory = _read(_inventory_rel())
     if inventory is None:
-        return _no_fix(f"no inventory at {_INVENTORY} to reconcile against")
+        return _no_fix(f"no inventory at {_inventory_rel()} to reconcile against")
 
     try:
         hosts = yaml_edit.inventory_hosts(inventory)
@@ -244,13 +272,13 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
         # An INI inventory, or YAML this editor cannot round-trip. Ansible may
         # well read it fine; the agent simply cannot edit it safely.
         return _no_fix(
-            f"cannot parse {_INVENTORY} well enough to edit it safely: {e}")
+            f"cannot parse {_inventory_rel()} well enough to edit it safely: {e}")
 
     groups = yaml_edit.inventory_groups(inventory) if hasattr(
         yaml_edit, "inventory_groups") else set()
     if expected in groups:
         return _no_fix(
-            f"'{expected}' is a group in {_INVENTORY}, not a host. Renaming a "
+            f"'{expected}' is a group in {_inventory_rel()}, not a host. Renaming a "
             f"host to match it would create a group/host name collision; the "
             f"group is more likely empty or dynamically populated")
     if expected in hosts:
@@ -284,7 +312,7 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
         "failure_type": failure.get("type", "unreachable_host"),
         "fix": {
             "action": "rename_host",
-            "target_file": _INVENTORY,
+            "target_file": _inventory_rel(),
             "old": stale,
             "new": expected,
             "rationale": f"Rename '{stale}' to '{expected}' so the play's "

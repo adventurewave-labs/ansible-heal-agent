@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -55,8 +56,9 @@ class PathNotAllowed(PatchError):
 #: here: the agent has no vault password and no business having one.
 _VAULT_HEADER = "$ANSIBLE_VAULT"
 
-#: An inline encrypted value: `password: !vault |`.
-_VAULT_TAG = "!vault"
+#: An inline encrypted value: `password: !vault |`. Anchored so the literal
+#: string in a comment or a plain scalar does not trip it.
+_VAULT_TAG_RE = re.compile(r"(^|:\s+|^\s*-\s+)!vault(\s|\||$)", re.M)
 
 
 class VaultRefused(PatchError):
@@ -70,7 +72,7 @@ def _refuse_if_vault(path: Path, original: str, target_rel: str) -> None:
             f"refusing to write {target_rel}: it is ansible-vault encrypted. "
             f"Decrypt it, re-run, and re-encrypt — the agent will not write "
             f"plaintext over a secrets file.")
-    if _VAULT_TAG in original:
+    if _VAULT_TAG_RE.search(original):
         raise VaultRefused(
             f"refusing to write {target_rel}: it contains inline !vault values. "
             f"A round-trip edit would not preserve them.")

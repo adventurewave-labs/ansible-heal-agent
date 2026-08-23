@@ -15,9 +15,25 @@ def commit_fix(fix: dict[str, Any], diagnosis: dict[str, Any]) -> str:
     if not target or fix.get("action") == "none":
         return ""
 
-    git_helper.add(target)
+    # Stage the resolved path. When the declared target is a symlink to another
+    # file inside the write surface, the write goes through the link, so the
+    # declared path's own blob is unchanged and git had nothing to commit —
+    # leaving the agent's edit sitting in the working tree, uncommitted.
+    git_helper.add(_resolved_target(target))
     msg = _build_message(fix, diagnosis)
     return git_helper.commit(msg)
+
+
+def _resolved_target(target: str) -> str:
+    """``target``, or what it points at when it is a symlink inside the repo."""
+    from agent.config import repo_root
+    path = repo_root() / target
+    try:
+        if path.is_symlink():
+            return str(path.resolve().relative_to(repo_root().resolve()))
+    except (OSError, ValueError):
+        pass
+    return target
 
 
 def commit_guard() -> str | None:
