@@ -149,7 +149,13 @@ def configured_inventory() -> Path | None:
             raw = (parser.get(section, "inventory") or "").split(",")[0].strip()
             if not raw:
                 continue
-            candidate = (repo_root() / raw).resolve()
+            # ansible-core expands `~` and `${VAR}`/`$VAR` in an inventory
+            # path; this did not, so a repo whose ansible.cfg used either —
+            # both ordinary — was reported broken by this runner while a real
+            # `ansible-playbook` ran it clean. Expanding still leaves the
+            # containment check below in charge of what the agent may read.
+            expanded = os.path.expanduser(os.path.expandvars(raw))
+            candidate = (repo_root() / expanded).resolve()
             try:
                 candidate.relative_to(repo_root().resolve())
             except ValueError:
@@ -652,21 +658,66 @@ def _hosts_in_inventory(inv: dict, pattern) -> list[str] | None:
     return result
 
 
-def _check_removed_modules(task: dict) -> str | None:
-    """Return error string if the task uses a removed module."""
-    # Simulated only. See the module docstring: on ansible-core 2.19 apt_key
-    # still resolves, so a real run would not produce this error for it.
-    REMOVED = {
-        "apt_key": "The 'apt_key' module is deprecated. Use "
-                   "ansible.builtin.get_url to fetch the key into "
-                   "/usr/share/keyrings instead.",
-        "docker": "The 'docker' module was removed. Use community.docker.docker_container.",
-    }
+#: Ansible reserved task/play keywords — never an action/module name. Every
+#: key in a task dict used to reach `_check_removed_modules`; asking
+#: ansible-doc about "name", "when" or "register" as if they were modules
+#: would have reported a removed-module failure on almost every ordinary task.
+_TASK_RESERVED_KEYS = frozenset({
+    "name", "hosts", "become", "become_user", "become_method", "become_flags",
+    "become_exe", "tags", "when", "loop", "with_items", "with_dict",
+    "with_fileglob", "with_first_found", "with_sequence", "with_together",
+    "loop_control", "register", "vars", "vars_files", "vars_prompt",
+    "environment", "notify", "changed_when", "failed_when", "ignore_errors",
+    "ignore_unreachable", "delegate_to", "delegate_facts", "run_once",
+    "until", "retries", "delay", "no_log", "check_mode", "diff", "args",
+    "action", "local_action", "connection", "remote_user", "port",
+    "any_errors_fatal", "async", "poll", "throttle", "timeout", "collections",
+    "module_defaults", "block", "rescue", "always", "_source_playbook",
+    "roles", "pre_tasks", "post_tasks", "tasks", "handlers", "gather_facts",
+    "serial", "strategy", "order", "max_fail_percentage", "force_handlers",
+    "verbosity", "listen", "when_all",
+})
+
+#: Wording kept for the two names the seeded demo scenario exercises, since
+#: ansible-doc's own message is terser than what the transcripts document.
+_REMOVED_MODULE_HINTS = {
+    "apt_key": "The 'apt_key' module is deprecated. Use "
+               "ansible.builtin.get_url to fetch the key into "
+               "/usr/share/keyrings instead.",
+    "docker": "The 'docker' module was removed. Use community.docker.docker_container.",
+}
+
+
+def _check_removed_modules(task: dict, cache: dict[str, bool | None]) -> tuple[str, str] | None:
+    """Return ``(module_key, message)`` if the task's module does not resolve.
+
+    Previously a two-entry hardcoded dict — accurate for the seeded scenario,
+    but blind to any other module name, *including the agent's own
+    replacements*. Once the agent swapped `docker` for
+    `community.docker.docker_container` — a collection this repo does not
+    install, so the name genuinely still does not resolve — the next mock run
+    no longer recognised either the old or the new name and reported the
+    pipeline healthy: ``Success: True`` over a playbook `ansible-playbook`
+    cannot run. Checking against ansible-doc, the same authority
+    ``agent.diagnoser.module_resolves`` uses, means a module that still
+    doesn't resolve after a "fix" is still a failure, whatever its name is.
+    ``cache`` is scoped to one run so a module used by many tasks costs one
+    ansible-doc call, not one per task.
+    """
+    from agent.diagnoser import module_resolves
     for key in task:
-        # strip ansible.builtin. prefix
         mod = key.split(".")[-1]
-        if mod in REMOVED:
-            return REMOVED[mod]
+        if key in _TASK_RESERVED_KEYS or mod in _TASK_RESERVED_KEYS:
+            continue
+        if key not in cache:
+            cache[key] = module_resolves(key)
+        if cache[key] is False:
+            hint = _REMOVED_MODULE_HINTS.get(mod)
+            message = hint or (
+                f"couldn't resolve module/action '{key}'. This often "
+                f"indicates a misspelling, missing collection, or incorrect "
+                f"module path.")
+            return key, message
     return None
 
 
@@ -787,6 +838,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     role_names = _role_defined_names()
     inventory_var_names = _inventory_vars(inv)
     playbook = _expand_playbook(playbook_path)
+    module_resolve_cache: dict[str, bool | None] = {}
 
     log_lines: list[str] = []
     log_lines.append(f"PLAYBOOK: {playbook_path.name} ***********************************")
@@ -797,7 +849,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
 
     rc = 0
 
-    # ── Phase A: parse-time validation ─────────────────────────────────────
+    # ── Phase A: parse-time validation ───────────────────────────────────────────────────────────────────────
     parse_failures_by_task: dict[tuple[str, str], list[dict]] = {}
     for play in playbook:
         target = play.get("hosts", "all")
@@ -813,16 +865,14 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
             key = (play_source, task_name)
 
             # Removed-module check
-            removed_err = _check_removed_modules(task)
-            if removed_err:
+            removed = _check_removed_modules(task, module_resolve_cache)
+            if removed:
+                module_key, removed_err = removed
                 rc = 2
                 f = {
                     "type": "removed_module",
                     "host": target,
-                    "module": next(
-                        (k for k in task if k.split(".")[-1] in {"apt_key", "docker"}),
-                        "unknown"
-                    ),
+                    "module": module_key,
                     "message": removed_err,
                     "playbook": play_source,
                     "play": play_name,
@@ -897,7 +947,7 @@ def run(playbook_path: Path, run_id: str | None = None) -> RunResult:
     log_lines.append("PHASE B: Runtime execution")
     log_lines.append("")
 
-    # ── Phase B: runtime execution ───────────────────────────────────────
+    # ── Phase B: runtime execution ──────────────────────────────────────────────────────────
     for play in playbook:
         target = play.get("hosts", "all")
         play_name = play.get("name", "<unnamed play>")
