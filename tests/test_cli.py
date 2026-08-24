@@ -57,9 +57,20 @@ def test_allowed_paths_flag_blocks_the_default_targets(scratch_repo):
 
 
 def test_apply_mode_heals_and_exits_zero(scratch_repo):
+    """The seeded baseline's module class migrates `docker` to
+    `community.docker.docker_container`, a collection this environment does
+    not install — so it genuinely does not reach green here (see
+    tests/test_agent.py::test_full_heal_loop_with_fallback for the same
+    behaviour exercised directly against heal()). The other two failure
+    classes still heal; assert on those instead of a blanket exit 0."""
     res = _run(["run", "--repo", str(scratch_repo), "--no-llm", "--no-transcript"])
-    assert res.exit_code == 0
-    assert "Success: True" in res.output
+    assert res.exit_code == 2
+    assert "Success: False" in res.output
+    log = subprocess.run(["git", "log", "--format=%s"], cwd=scratch_repo,
+                         capture_output=True, text=True).stdout
+    assert "migrate deprecated module" in log
+    assert "rename host to match playbook expectation" in log
+    assert "add missing variable to group_vars" in log
 
 
 def test_failed_run_exits_non_zero(scratch_repo):

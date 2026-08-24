@@ -342,14 +342,20 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 245 tests
+make test          # 259 tests
 make lint
 ```
 
-- `tests/test_perturbation.py` — 38 tests, of which **26 require convergence**
-  across varied variable names, host names and modules, so the agent is not
-  tuned to one scenario. The other 12 are the counterweight: 8 pin the inferred
-  defaults and 4 assert the agent *refuses* rather than guessing.
+- `tests/test_perturbation.py` — 37 tests, of which **25 vary a failure the
+  agent must generalise across names** — variable names, host names and the
+  module — so the agent is not tuned to one scenario. They check dynamically
+  whether the seeded module's replacement itself resolves via `ansible-doc`,
+  and assert a fully green pipeline only when it does — in an environment
+  without the `community.docker` collection, the host and variable classes
+  still converge on every name, and the module swap still lands as a genuine
+  commit, but the pipeline honestly stays red over it rather than claim a
+  green it did not earn. The other 12 are the counterweight: 8 pin the
+  inferred defaults and 4 assert the agent *refuses* rather than guessing.
 - `tests/test_real_ansible.py` drives a real `ansible-playbook` process and
   asserts the end state by running the binary again afterwards — for the host
   and variable classes, that means exit 0 from ansible itself, not from our own

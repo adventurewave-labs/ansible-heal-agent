@@ -144,39 +144,70 @@ def is_detached() -> bool:
     return _git("symbolic-ref", "--quiet", "HEAD").returncode != 0
 
 
-#: Paths already modified in the working tree when the run started.
-_PREEXISTING_DIRTY: set[str] = set()
+#: Paths confirmed clean by `check_and_note_clean()` immediately before the
+#: agent wrote them — what `was_dirty()` reports at commit time.
+_CONFIRMED_CLEAN_AT_WRITE: set[str] = set()
 
 
-def snapshot_dirty() -> None:
-    """Record the working tree's modified paths before the agent edits anything.
+def reset_write_tracking() -> None:
+    """Clear the per-run "confirmed clean at write time" record.
 
-    Stored as absolute paths. `git status --porcelain` prints them relative to
-    the *git top level*, which is not the agent's repo root when the target is
-    a subdirectory — so comparing the two strings never matched, and the guard
-    silently never fired for exactly the layout it was written for. Quoted
-    paths (a filename with a space) missed for the same reason.
+    Call once per run, before the agent touches anything. `was_dirty()` only
+    trusts a path that `check_and_note_clean()` has confirmed clean; without
+    a reset that record only grows across runs, and a resolved path from an
+    earlier run could be (incorrectly) treated as confirmed-clean for an
+    unrelated later write that happens to resolve to the same absolute path.
     """
-    global _PREEXISTING_DIRTY
-    top = _git("rev-parse", "--show-toplevel").stdout.strip()
-    base = Path(top) if top else repo_root()
-    paths: set[str] = set()
-    for line in _git("status", "--porcelain").stdout.splitlines():
-        if len(line) <= 3:
-            continue
-        entry = line[3:].strip().split(" -> ")[-1].strip()
-        if entry.startswith('"') and entry.endswith('"'):
-            try:
-                entry = entry[1:-1].encode().decode("unicode_escape")
-            except UnicodeDecodeError:
-                entry = entry[1:-1]
-        paths.add(str((base / entry).resolve()))
-    _PREEXISTING_DIRTY = paths
+    _CONFIRMED_CLEAN_AT_WRITE.clear()
+
+
+def is_dirty(path: str | Path) -> bool:
+    """True if ``path`` has uncommitted changes right now.
+
+    A live query for exactly this one pathspec, not a parse of the whole
+    tree's `git status --porcelain` output — which meant never having to
+    decode git's quoting of some *other* file's name to answer a question
+    about this one. (That decoding had its own bug: git escapes a non-ASCII
+    byte as an octal `\\NNN`, and treating each escape as a codepoint rather
+    than a byte turned `café.yml` into a string that matched no real file's
+    resolved path, so the whole-tree version of this check silently never
+    fired for a non-ASCII filename.)
+    """
+    proc = _git("status", "--porcelain", "--", str(path))
+    return bool(proc.stdout.strip())
+
+
+def check_and_note_clean(path: str | Path) -> bool:
+    """Live-check ``path`` for uncommitted changes, and remember a clean answer.
+
+    Call this exactly once, immediately before writing ``path`` — this is
+    what actually closes the gap a one-time, run-start snapshot left open. A
+    run can span minutes across several pipeline executions and an optional
+    LLM round-trip, and an operator's edit made after the run started but
+    before the agent reached this specific file was invisible to a snapshot
+    taken once, before any of that happened: moving the check earlier in the
+    call *sequence* did not make the fact it relied on stay true for the run's
+    *duration*. Returns whether ``path`` was dirty just now.
+    """
+    resolved = str((repo_root() / path).resolve())
+    dirty = is_dirty(path)
+    if not dirty:
+        _CONFIRMED_CLEAN_AT_WRITE.add(resolved)
+    return dirty
 
 
 def was_dirty(path: str | Path) -> bool:
-    """True if ``path`` already had uncommitted changes when the run started."""
-    return str((repo_root() / path).resolve()) in _PREEXISTING_DIRTY
+    """True unless ``path`` was confirmed clean by `check_and_note_clean()`.
+
+    Used at commit time, after the agent's own edit is already on disk — by
+    then `is_dirty()` would report True regardless, since the agent's own
+    fresh, not-yet-committed write is sitting right there. This instead
+    reports what was true a moment earlier, at the one point a live check and
+    "was this the operator's doing" mean the same thing. A path never passed
+    to `check_and_note_clean()` first counts as dirty: refusing to commit a
+    file nothing examined is the safe direction to fail in.
+    """
+    return str((repo_root() / path).resolve()) not in _CONFIRMED_CLEAN_AT_WRITE
 
 
 def add(path: str | Path) -> None:
