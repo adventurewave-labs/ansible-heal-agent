@@ -1,7 +1,7 @@
 # Implementation Plan — Autonomous Ansible Heal Agent
 
 > This Markdown file mirrors the polished DOCX at
-> `/home/z/my-project/download/PLAN-Ansible-Heal-Agent.docx`. The DOCX is the
+> `[see repository documentation]`. The DOCX is the
 > canonical version; this file is for in-repo reading.
 
 **Owner:** Platform Reliability Engineering
