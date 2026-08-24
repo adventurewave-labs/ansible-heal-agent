@@ -489,7 +489,19 @@ def module_resolves(module: str) -> bool | None:
     # case as unanswerable (None) rather than False.
     if re.search(rf"{re.escape(module)}.{{0,20}}was not found", combined):
         return False
-    if re.search(r"module has been removed\b", combined):
+    # The tombstone wording itself is not stable across ansible-core
+    # releases either — 2.19 says "The 'ns.col.module' module has been
+    # removed", 2.17 says "ns.col.module has been removed" with no "module"
+    # in between — so anchoring on the literal phrase "module has been
+    # removed" missed the older wording and fell through to the unanswerable
+    # (None) case on any control node still running 2.17. Anchoring on the
+    # queried name itself, wherever it sits relative to "has been removed",
+    # matches both, while still requiring that name nearby is what keeps this
+    # from firing on an ordinary *parameter* deprecation note — e.g.
+    # blockinfile's and replace's docs both contain the unrelated sentence
+    # "Option ... has been removed in Ansible 2.5" with neither module name
+    # anywhere near it.
+    if re.search(rf"\b{re.escape(module)}\b.{{0,25}}\bhas been removed\b", combined):
         return False
     if proc.returncode != 0:
         return None
