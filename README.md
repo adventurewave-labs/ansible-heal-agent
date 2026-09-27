@@ -304,7 +304,14 @@ budget re-running a pipeline that cannot change.
 ## The LLM part
 
 `agent/diagnoser.py` asks a model for a structured fix and validates it against
-the same gates as everything else; if the model is unavailable, returns
+the same gates as everything else. The request uses each provider's
+structured-output mode — on Anthropic a single forced tool whose
+`input_schema` is the diagnosis contract (`DIAGNOSIS_SCHEMA`), with the system
+prompt marked for prompt caching; on OpenRouter a strict `json_schema`
+response format — and the reply is re-validated locally against the same
+schema whichever provider answered, so an off-contract answer is rejected
+before it reaches a gate. Client errors (400/401/403) fail immediately; only
+408/429/5xx are retried. As before, if the model is unavailable, returns
 malformed JSON, or proposes a patch that does not apply, the agent falls back to
 the deterministic rules and **says so in the transcript**.
 
@@ -342,7 +349,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 259 tests
+make test          # 271 tests
 make lint
 ```
 

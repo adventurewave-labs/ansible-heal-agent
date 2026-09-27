@@ -122,7 +122,7 @@ def test_autodetect_prefers_anthropic(monkeypatch):
 
     assert llm.active_provider() == "anthropic"
     assert llm.is_available() is True
-    assert llm.active_model() == "claude-sonnet-4-5"
+    assert llm.active_model() == llm.PROVIDER_MODELS["anthropic"]
 
 
 def test_autodetect_falls_back_to_openrouter(monkeypatch):
@@ -233,7 +233,7 @@ def test_anthropic_happy_path(monkeypatch):
     assert call["timeout"] == 60
     assert call["headers"]["x-api-key"] == "sk-ant-happy-path-key"
     assert call["headers"]["anthropic-version"] == "2023-06-01"
-    assert call["body"]["model"] == "claude-sonnet-4-5"
+    assert call["body"]["model"] == llm.PROVIDER_MODELS["anthropic"]
     assert call["body"]["max_tokens"] == llm.MAX_TOKENS
     assert call["body"]["system"] == "be terse"
     assert call["body"]["messages"] == [
@@ -361,7 +361,7 @@ def test_all_retries_exhausted_raises_llm_error(monkeypatch):
     assert len(calls) == 2
     assert "failed after 2 attempt(s)" in message
     assert "HTTP 503" in message
-    assert "claude-sonnet-4-5" in message
+    assert llm.PROVIDER_MODELS["anthropic"] in message
 
 
 def test_max_retries_controls_attempt_count(monkeypatch):

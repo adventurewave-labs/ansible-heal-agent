@@ -70,6 +70,42 @@ Rules:
   default.
 """
 
+#: The diagnosis contract as JSON Schema. Sent to the provider as a
+#: structured-output constraint (forced tool call / json_schema response
+#: format) and re-checked locally, so malformed output never reaches a gate.
+#: Shaped for OpenAI-style strict mode: every property required, no extras.
+DIAGNOSIS_SCHEMA: dict[str, Any] = {
+    "name": "submit_diagnosis",
+    "description": "Submit the root cause and the smallest safe fix for one "
+                   "Ansible pipeline failure.",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["diagnosis", "failure_type", "fix"],
+        "properties": {
+            "diagnosis": {"type": "string", "minLength": 1},
+            "failure_type": {
+                "type": "string",
+                "enum": ["unreachable_host", "no_hosts_matched",
+                         "removed_module", "undefined_variable", "other"],
+            },
+            "fix": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["action", "target_file", "search", "replace",
+                             "rationale"],
+                "properties": {
+                    "action": {"type": "string", "enum": ["edit_file"]},
+                    "target_file": {"type": "string", "minLength": 1},
+                    "search": {"type": "string", "minLength": 1},
+                    "replace": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
 #: Modules removed or renamed upstream, and what to use instead. Keyed on the
 #: short name so both ``apt_key`` and ``ansible.builtin.apt_key`` resolve.
 MODULE_REPLACEMENTS: dict[str, dict[str, Any]] = {
@@ -189,7 +225,7 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
         failure_json=json.dumps(failure, indent=2),
         context=_load_context(failure, repo_root()),
     )
-    return llm.chat_json(prompt, system=SYSTEM_PROMPT)
+    return llm.chat_json(prompt, system=SYSTEM_PROMPT, schema=DIAGNOSIS_SCHEMA)
 
 
 # ── deterministic rules ─────────────────────────────────────────────
