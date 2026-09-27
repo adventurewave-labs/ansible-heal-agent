@@ -4,7 +4,7 @@ PY      := python3
 PIP     := pip3
 DEMO    := demo.py
 
-.PHONY: help demo test lint clean reset-seed install
+.PHONY: help demo test lint clean reset-seed install eval
 
 help:
 	@echo "ansible-heal-agent — autonomous Ansible healer"
@@ -14,6 +14,7 @@ help:
 	@echo "  make reset-seed Reset the repo to the broken baseline state"
 	@echo "  make test       Run pytest suite (uses scratch repos; never touches your tree)"
 	@echo "  make lint       Run ruff"
+	@echo "  make eval       Measure heal rate / false-fix rate over the corpus"
 	@echo "  make clean      Remove transcripts, pipeline runs, caches"
 
 install:
@@ -34,8 +35,11 @@ test:
 lint:
 	ruff check .
 
+eval:
+	$(PY) -m agent.cli eval --min-heal-rate 0.9 --max-false-fix-rate 0
+
 clean:
 	rm -rf transcripts/*.md transcripts/*.json pipeline/runs/*.log pipeline/runs/*.json
 	rm -rf .pytest_cache __pycache__ agent/__pycache__ pipeline/__pycache__ scenarios/__pycache__ tests/__pycache__
-	rm -rf .demo-workspace
+	rm -rf .demo-workspace eval-report
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

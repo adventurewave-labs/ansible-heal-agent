@@ -77,3 +77,27 @@ jobs:
           name: demo-transcript
           path: .demo-workspace/transcripts/*.md
           if-no-files-found: error
+
+  eval:
+    name: heal-rate eval (gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: |
+          git config --global user.email "ci@ansible-heal.invalid"
+          git config --global user.name "CI"
+      - name: Heal rate >= 90%, zero false fixes
+        run: make eval
+      - name: Job summary
+        if: always()
+        run: cat eval-report/eval-report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: eval-report/

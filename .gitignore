@@ -19,3 +19,5 @@ pipeline/runs/*.json
 *.tmp
 .DS_Store
 .demo-workspace/
+
+eval-report/

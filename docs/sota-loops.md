@@ -13,7 +13,7 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
 - [x] **L1 — OpenTelemetry.** GenAI semantic-convention spans around heal loop,
   diagnose, LLM call, patch, commit, pipeline run. Optional dependency; no-op
   when `opentelemetry-api` is absent. Closes PRD NFR-5.
-- [ ] **L2 — Heal-rate eval harness.** `ansible-heal eval` over a generated
+- [x] **L2 — Heal-rate eval harness.** `ansible-heal eval` over a generated
   perturbation corpus: heal rate, false-fix rate, decline rate, iterations —
   JSON + Markdown report.
 - [ ] **L3 — Missing-collection class.** When a module resolves only via an
@@ -29,3 +29,4 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
 
 - L0 — structured outputs shipped; 12 new tests (`tests/test_structured_output.py`).
 - L1 — OpenTelemetry spans shipped (`agent/telemetry.py`, `[otel]` extra, GenAI semconv incl. token + cache-read usage); PRD NFR-5 → implemented; 7 new tests.
+- L2 — `ansible-heal eval` / `make eval` shipped (`agent/evaluation.py`): 20-case corpus (16 heal, 4 must-decline), heal 100%, false-fix 0%, decline precision 100% on the deterministic path; gated CI job with job-summary table; 9 new tests.

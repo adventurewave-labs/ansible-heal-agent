@@ -366,10 +366,39 @@ inventory itself and emits Ansible-shaped logs. It exists so the demo and the
 bulk of the suite run in under a second with no Ansible installed. It is a
 simulator and is labelled as one.
 
+## Measuring it
+
+```console
+$ make eval          # or: ansible-heal eval [--runner real] [--llm]
+ok   healed    host/web-01->web-server-01  (1.4s)
+...
+ok   declined  decline/unrelated-host  (1.5s)
+ok   declined  decline/empty-group  (1.5s)
+
+heal rate: 100.0%   false-fix rate: 0.0%   decline precision: 100.0%
+```
+
+`agent/evaluation.py` generates a deterministic corpus — 16 cases the agent
+should heal (host renames, undefined variables, both at once) and cases it
+must **decline** (an unrelated host, an empty group, a module with no known
+replacement, a variable defined only in `host_vars`) — runs the real apply-mode
+loop against each in a throwaway git repo, and reports:
+
+| metric | meaning |
+|---|---|
+| heal rate | heal cases that ended green with a commit |
+| false-fix rate | decline cases where the agent committed anything — the number that matters |
+| decline precision | of the refusals it made, how many were right |
+
+A green pipeline with no commit does not count as a heal. Results go to
+`eval-report/eval-report.{json,md}`; CI runs it gated at ≥90% heal rate and
+zero false fixes and posts the table to the job summary. `--llm` scores the
+model path through the same gates, so the two are directly comparable.
+
 ## Tests
 
 ```bash
-make test          # 278 tests
+make test          # 287 tests
 make lint
 ```
 
@@ -404,8 +433,8 @@ Honest list of what is **not** here:
   a modernisation rather than a fix for a broken play
 - converging the module class against real Ansible, which needs the replacement
   collection present
-- a measured autonomous-heal-rate figure across a realistic corpus — the
-  perturbation suite is the harness for it, the corpus does not exist yet
+- a heal-rate figure on a corpus of *real* broken repositories — `make eval`
+  measures a generated corpus, which is necessary but not the same thing
 
 See [PRD.md](PRD.md) for requirement-by-requirement status and
 [PLAN.md](PLAN.md) for how it was built.
