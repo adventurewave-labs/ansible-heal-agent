@@ -875,7 +875,11 @@ def collection_installed(name: str) -> bool | None:
     if proc.returncode != 0:
         # Some ansible-core releases exit non-zero for "not installed" rather
         # than printing an empty object; only that wording is a definite no.
-        if re.search(r"unable to find|could not find|not found",
+        # ansible-core 2.17 also exits 5 with "None of the provided paths were
+        # usable" when no collections directory exists at all — which is a
+        # definite "nothing is installed", not an unanswerable question.
+        if re.search(r"unable to find|could not find|not found|"
+                     r"none of the provided paths were usable",
                      proc.stderr or "", re.I):
             return False
         return None
