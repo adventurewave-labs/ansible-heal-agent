@@ -369,7 +369,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          #  tests
+make test          # 0 tests
 make lint
 ```
 
