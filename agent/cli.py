@@ -56,13 +56,24 @@ def cli():
               help="Disable the LLM; use the deterministic diagnoser only.")
 @click.option("--transcript/--no-transcript", default=True,
               help="Write a Markdown transcript under transcripts/.")
+@click.option("--sarif", "sarif_path", default=None, metavar="PATH",
+              help="With --dry-run: also write findings as SARIF 2.1.0 to PATH "
+                   "(for GitHub code scanning).")
+@click.option("--fail-on-findings", is_flag=True, default=False,
+              help="With --dry-run: exit 2 when any failure was found, even if "
+                   "a SARIF file was written (default: exit 0 once reported).")
 def run(repo, playbook, max_retries, allowed_paths, dry_run,
-        require_human_approval, remote, no_llm, transcript):
+        require_human_approval, remote, no_llm, transcript, sarif_path,
+        fail_on_findings):
     """Run the heal loop once and report the result."""
     if dry_run and require_human_approval:
         raise click.UsageError(
             "--dry-run and --require-human-approval are mutually exclusive: "
             "one writes nothing at all, the other writes to a branch.")
+
+    if (sarif_path or fail_on_findings) and not dry_run:
+        raise click.UsageError(
+            "--sarif and --fail-on-findings report dry-run proposals; add --dry-run.")
 
     _apply_common(repo, allowed_paths)
     mode = MODE_DRY_RUN if dry_run else MODE_PR if require_human_approval else MODE_APPLY
@@ -129,6 +140,15 @@ def run(repo, playbook, max_retries, allowed_paths, dry_run,
 
     click.echo(f"\nSuccess: {result.success}  Iterations: {result.iterations}  "
                f"Final exit: {result.final_exit_code}")
+    if sarif_path:
+        from agent import sarif
+        out = sarif.write(result, sarif_path)
+        click.echo(f"sarif: {out}  ({len(result.proposals)} result(s))")
+        # Findings reported as SARIF are the output, not a crash: code
+        # scanning needs the upload step to run. --fail-on-findings restores
+        # a failing exit for pipelines that want to gate on them.
+        found = bool(result.proposals)
+        raise SystemExit(2 if (found and fail_on_findings) else 0)
     raise SystemExit(0 if result.success else 2)
 
 

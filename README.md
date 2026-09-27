@@ -377,6 +377,35 @@ inventory itself and emits Ansible-shaped logs. It exists so the demo and the
 bulk of the suite run in under a second with no Ansible installed. It is a
 simulator and is labelled as one.
 
+## Code scanning (SARIF + GitHub Action)
+
+`--dry-run --sarif out.sarif` writes every finding as SARIF 2.1.0: one rule per
+failure class (`AHA001` host pattern, `AHA002` variable, `AHA003` module,
+`AHA004` missing collection, `AHA900` unclassified), located at the playbook
+line that triggered it, with the exact diff the apply mode would commit in the
+alert body. A validated fix is a `warning`, a refusal a `note`, a write the
+surface would block an `error`. Fingerprints are stable, so re-scans update
+alerts rather than duplicate them.
+
+The repository is also a composite action. It is read-only against the
+scanned repo:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@v4
+  - uses: adventurewave-labs/ansible-heal-agent@main
+    with:
+      playbook: ansible/playbooks/site.yml
+      runner: real            # or mock
+      fail-on-findings: false
+```
+
+Findings land in pull-request annotations and Security → Code scanning. Inputs
+reach the shell through `env:`, never interpolated into the script.
+
 ## Measuring it
 
 ```console
@@ -409,7 +438,7 @@ model path through the same gates, so the two are directly comparable.
 ## Tests
 
 ```bash
-make test          # 301 tests
+make test          # 312 tests
 make lint
 ```
 

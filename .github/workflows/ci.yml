@@ -101,3 +101,28 @@ jobs:
         with:
           name: eval-report
           path: eval-report/
+
+  action:
+    name: composite action (dogfood)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan this repo's own seeded baseline
+        id: scan
+        uses: ./
+        with:
+          runner: mock
+          upload: "false"
+      - name: The SARIF log exists and has findings
+        run: |
+          python3 - <<'PY'
+          import json
+          log = json.load(open("${{ steps.scan.outputs.sarif-file }}"))
+          results = log["runs"][0]["results"]
+          assert log["version"] == "2.1.0" and results, results
+          print(f"{len(results)} SARIF result(s)")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ansible-heal-sarif
+          path: ansible-heal.sarif

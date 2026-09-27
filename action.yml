@@ -1,0 +1,84 @@
+name: "ansible-heal-agent scan"
+description: >-
+  Dry-run ansible-heal-agent against an Ansible repository and publish its
+  findings — with the exact fix it would make — to GitHub code scanning.
+  Read-only: nothing is written to or committed in the scanned repository.
+author: "Adventure Wave Labs"
+branding:
+  icon: "activity"
+  color: "green"
+
+inputs:
+  path:
+    description: "Repository (or subdirectory) to scan, relative to the workspace."
+    default: "."
+  playbook:
+    description: "Entry playbook, relative to path."
+    default: "ansible/playbooks/site.yml"
+  runner:
+    description: "mock (bundled simulator) or real (ansible-playbook)."
+    default: "real"
+  allowed-paths:
+    description: "Write surface used to decide which proposals would be blocked."
+    default: "ansible/**"
+  sarif-file:
+    description: "Where to write the SARIF log."
+    default: "ansible-heal.sarif"
+  upload:
+    description: "Upload the SARIF to code scanning (needs security-events: write)."
+    default: "true"
+  fail-on-findings:
+    description: "Fail the step when any finding is reported."
+    default: "false"
+  python-version:
+    description: "Python used to run the agent."
+    default: "3.12"
+
+outputs:
+  sarif-file:
+    description: "Path of the SARIF log that was written."
+    value: ${{ steps.scan.outputs.sarif-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install ansible-heal-agent
+      shell: bash
+      run: pip install "${{ github.action_path }}"
+
+    - name: Dry-run scan
+      id: scan
+      shell: bash
+      env:
+        PIPELINE_RUNNER: ${{ inputs.runner }}
+        ANSIBLE_HEAL_ALLOWED_PATHS: ${{ inputs.allowed-paths }}
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_PLAYBOOK: ${{ inputs.playbook }}
+        INPUT_SARIF: ${{ inputs.sarif-file }}
+        INPUT_FAIL: ${{ inputs.fail-on-findings }}
+      run: |
+        args=(run --repo "$INPUT_PATH" --playbook "$INPUT_PLAYBOOK" --dry-run
+              --no-llm --no-transcript --sarif "$INPUT_SARIF")
+        if [ "$INPUT_FAIL" = "true" ]; then args+=(--fail-on-findings); fi
+        set +e
+        ansible-heal "${args[@]}"
+        rc=$?
+        set -e
+        echo "sarif-file=$INPUT_SARIF" >> "$GITHUB_OUTPUT"
+        echo "exit-code=$rc" >> "$GITHUB_OUTPUT"
+
+    - name: Upload to code scanning
+      if: ${{ inputs.upload == 'true' && always() }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+        category: ansible-heal-agent
+
+    - name: Propagate scan result
+      if: ${{ steps.scan.outputs.exit-code != '0' }}
+      shell: bash
+      run: exit ${{ steps.scan.outputs.exit-code }}

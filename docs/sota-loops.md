@@ -20,7 +20,7 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
   uninstalled collection, declare it in `collections/requirements.yml`
   (ansible-galaxy format) instead of stalling red; declines when already
   declared or ambiguous.
-- [ ] **L4 — SARIF + GitHub Action.** SARIF 2.1.0 for proposals and declines;
+- [x] **L4 — SARIF + GitHub Action.** SARIF 2.1.0 for proposals and declines;
   composite `action.yml` running dry-run and uploading to code scanning.
 - [ ] **L5 — MCP server.** Read-only stdio MCP server exposing diagnose,
   dry-run and explain-decline as tools. Final docs/PR pass.
@@ -31,3 +31,4 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
 - L1 — OpenTelemetry spans shipped (`agent/telemetry.py`, `[otel]` extra, GenAI semconv incl. token + cache-read usage); PRD NFR-5 → implemented; 7 new tests.
 - L2 — `ansible-heal eval` / `make eval` shipped (`agent/evaluation.py`): 20-case corpus (16 heal, 4 must-decline), heal 100%, false-fix 0%, decline precision 100% on the deterministic path; gated CI job with job-summary table; 9 new tests.
 - L3 — missing-collection class shipped: `ansible-galaxy`-verified, `declare_collection` action (the only action allowed to create its target), round-trip append preserving roles/comments, five decline paths; module-class runs now end with the dependency declared and an explicit install instruction; 14 new tests.
+- L4 — `--sarif` / `--fail-on-findings` on dry-run (`agent/sarif.py`), composite `action.yml` uploading to code scanning (injection-safe env inputs), dogfood CI job; 11 new tests.
