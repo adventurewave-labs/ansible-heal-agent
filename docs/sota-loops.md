@@ -10,7 +10,7 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
   forced tool call + prompt caching on the system prompt, OpenRouter strict
   `json_schema`, local validation for every provider; 4xx fail fast, 408/429/5xx
   retried; default model bumped to `claude-sonnet-5`.
-- [ ] **L1 — OpenTelemetry.** GenAI semantic-convention spans around heal loop,
+- [x] **L1 — OpenTelemetry.** GenAI semantic-convention spans around heal loop,
   diagnose, LLM call, patch, commit, pipeline run. Optional dependency; no-op
   when `opentelemetry-api` is absent. Closes PRD NFR-5.
 - [ ] **L2 — Heal-rate eval harness.** `ansible-heal eval` over a generated
@@ -28,3 +28,4 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
 ## Log
 
 - L0 — structured outputs shipped; 12 new tests (`tests/test_structured_output.py`).
+- L1 — OpenTelemetry spans shipped (`agent/telemetry.py`, `[otel]` extra, GenAI semconv incl. token + cache-read usage); PRD NFR-5 → implemented; 7 new tests.

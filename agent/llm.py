@@ -37,6 +37,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from agent import telemetry
+
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
@@ -73,6 +75,23 @@ BACKOFF_SECONDS = 1.0
 DEFAULT_MODEL = PROVIDER_MODELS["anthropic"]
 
 _REDACTED = "***REDACTED***"
+
+#: Token usage reported by the most recent HTTP completion, normalised to
+#: ``{"input", "output", "cache_read"}``. Read by :func:`chat` for telemetry.
+_last_usage: dict[str, int] = {}
+
+
+def _record_usage(data: dict) -> None:
+    usage = data.get("usage") if isinstance(data, dict) else None
+    _last_usage.clear()
+    if not isinstance(usage, dict):
+        return
+    pairs = {
+        "input": usage.get("input_tokens", usage.get("prompt_tokens")),
+        "output": usage.get("output_tokens", usage.get("completion_tokens")),
+        "cache_read": usage.get("cache_read_input_tokens"),
+    }
+    _last_usage.update({k: v for k, v in pairs.items() if isinstance(v, int)})
 
 # Where the z-ai CLI backend caches its JSON output between calls.
 _TMP_DIR = Path(tempfile.gettempdir()) / "ansible-heal-agent"
@@ -285,6 +304,7 @@ def _chat_anthropic(
             }]
 
     data = _post_json(ANTHROPIC_URL, headers, payload, "anthropic")
+    _record_usage(data)
     blocks = data.get("content")
     if not isinstance(blocks, list):
         raise _Transient("anthropic response had no 'content' list")
@@ -330,6 +350,7 @@ def _chat_openrouter(
         }
 
     data = _post_json(OPENROUTER_URL, headers, payload, "openrouter")
+    _record_usage(data)
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -399,6 +420,30 @@ def chat(
         raise LLMError(why)
 
     model = active_model()
+    with telemetry.span(
+        f"chat {model}",
+        **{
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": provider,
+            "gen_ai.request.model": model,
+            "gen_ai.request.max_tokens": MAX_TOKENS,
+            "gen_ai.output.type": "json" if schema else "text",
+        },
+    ) as current:
+        text, attempts_used = _chat_attempts(
+            provider, model, prompt, system, max_retries, schema)
+        telemetry.set_attrs(current, **{
+            "ansible_heal.llm.attempts": attempts_used,
+            "gen_ai.usage.input_tokens": _last_usage.get("input"),
+            "gen_ai.usage.output_tokens": _last_usage.get("output"),
+            "gen_ai.usage.cache_read.input_tokens": _last_usage.get("cache_read"),
+        })
+        return text
+
+
+def _chat_attempts(provider, model, prompt, system, max_retries, schema):
+    """The retry loop behind :func:`chat`. Returns ``(text, attempts_used)``."""
+    _last_usage.clear()
     backend = _BACKENDS[provider]
     attempts = max(1, int(max_retries))
     last_err: str | None = None
@@ -410,7 +455,7 @@ def chat(
                 if schema else backend(prompt, system, model)
             )
             if content and content.strip():
-                return content.strip()
+                return content.strip(), attempt
             last_err = f"{provider} returned an empty completion"
         except _Transient as exc:
             last_err = str(exc)

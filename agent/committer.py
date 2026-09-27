@@ -3,9 +3,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent import telemetry
 from pipeline import git_helper
 
 
+@telemetry.traced(
+    "ansible_heal.commit",
+    attrs=lambda fix, diagnosis: {
+        "ansible_heal.fix.target_file": fix.get("target_file"),
+        "ansible_heal.failure.type": diagnosis.get("failure_type"),
+    },
+    result_attrs=lambda sha: {"vcs.ref.head.revision": sha or None},
+)
 def commit_fix(fix: dict[str, Any], diagnosis: dict[str, Any]) -> str:
     """Stage the file touched by `fix` and commit with a conventional message.
 

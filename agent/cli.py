@@ -25,6 +25,10 @@ def _apply_common(repo: str | None, allowed_paths: str | None) -> None:
 @click.version_option("0.1.0")
 def cli():
     """ansible-heal-agent — autonomous Ansible pipeline healer."""
+    # Ships spans over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set and the
+    # [otel] extra is installed; otherwise a no-op.
+    from agent import telemetry
+    telemetry.configure_from_env()
 
 
 @cli.command()

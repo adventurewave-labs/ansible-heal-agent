@@ -194,7 +194,7 @@ repeatedly proposes patches that don't actually fix the underlying problem.
 | NFR-2 | MUST     | Agent never writes outside `ANSIBLE_HEAL_ALLOWED_PATHS` globs (default: `ansible/**`). | **MET** — the env var previously appeared nowhere in the codebase; enforced in `agent/patcher.py`, `tests/test_safety.py` |
 | NFR-3 | MUST     | Agent never force-pushes, never rewrites history, never touches main without `--require-human-approval` in PR-mode. | **MET** — the flag previously did not exist; asserted by base-branch-SHA-unchanged tests |
 | NFR-4 | MUST     | Agent is idempotent: re-running `heal()` on an already-green pipeline is a no-op. | **MET** — asserted by commit count, not by inspection |
-| NFR-5 | SHOULD   | Agent emits OpenTelemetry spans for each component. | **NOT IMPLEMENTED** — roadmap |
+| NFR-5 | SHOULD   | Agent emits OpenTelemetry spans for each component. | **IMPLEMENTED** — `agent/telemetry.py`; GenAI semconv on LLM calls; optional `[otel]` extra; `tests/test_telemetry.py` |
 | NFR-6 | WON'T    | Agent does not perform multi-region failover or capacity planning. | n/a |
 
 Each MUST requirement is covered by at least one test and exercised end-to-end

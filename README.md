@@ -323,6 +323,26 @@ raises, because transcripts get committed and uploaded.
 **With no provider configured the agent is fully deterministic**, and the demo
 says so rather than implying a model was involved.
 
+## Tracing
+
+Every component emits an OpenTelemetry span — `ansible_heal.run`,
+`ansible_heal.pipeline.run`, `ansible_heal.diagnose`, `ansible_heal.commit`,
+and one `chat <model>` span per LLM call carrying the GenAI semantic
+conventions (`gen_ai.provider.name`, `gen_ai.request.model`,
+`gen_ai.usage.input_tokens` / `output_tokens` / `cache_read.input_tokens`), so
+GenAI-aware backends show model calls, token spend and prompt-cache hits
+without custom mapping.
+
+```bash
+pip install 'ansible-heal-agent[otel]'
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ansible-heal run --repo ~/infra --dry-run
+```
+
+It is optional: without OpenTelemetry installed the instrumentation is a
+no-op, and `ANSIBLE_HEAL_OTEL=0` switches it off when it is. Spans carry
+names, counts, exit codes and paths — never prompts, completions, file
+contents or credentials; those stay in the transcript.
+
 ## The two runners
 
 `PIPELINE_RUNNER=real` shells out to `ansible-playbook` and collects failures
@@ -349,7 +369,7 @@ simulator and is labelled as one.
 ## Tests
 
 ```bash
-make test          # 271 tests
+make test          #  tests
 make lint
 ```
 
@@ -384,7 +404,6 @@ Honest list of what is **not** here:
   a modernisation rather than a fix for a broken play
 - converging the module class against real Ansible, which needs the replacement
   collection present
-- OpenTelemetry spans (PRD NFR-5, `SHOULD`, not implemented)
 - a measured autonomous-heal-rate figure across a realistic corpus — the
   perturbation suite is the harness for it, the corpus does not exist yet
 
