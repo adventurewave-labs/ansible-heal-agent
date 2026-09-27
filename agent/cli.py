@@ -228,6 +228,16 @@ def eval_cmd(out_dir, runner, use_llm, name_filter, min_heal_rate,
     raise SystemExit(1 if failed else 0)
 
 
+@cli.command(name="mcp")
+def mcp_cmd():
+    """Serve read-only diagnose/explain tools over MCP (stdio).
+
+    Register with a client, e.g. `claude mcp add ansible-heal -- ansible-heal mcp`.
+    """
+    from agent import mcp_server
+    mcp_server.serve()
+
+
 def main():
     cli()
 

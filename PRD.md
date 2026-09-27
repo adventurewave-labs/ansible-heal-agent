@@ -180,7 +180,7 @@ repeatedly proposes patches that don't actually fix the underlying problem.
 |-------|----------|-------------|--------|
 | FR-1  | MUST     | Agent detects pipeline non-zero exit within 5 seconds. | **MET** — `pipeline/runner.py`; sub-second in both runners |
 | FR-2  | MUST     | Agent extracts structured failure records (type, host, message, playbook, task). | **MET** — `pipeline/callback_plugins/heal_json.py` for real runs, `agent/log_scanner.py` for parse-time errors |
-| FR-3  | MUST     | Agent calls an LLM for diagnosis; falls back to rule-based on any error. | **MET, RESTATED** — was "GLM-4-Plus via z-ai CLI", which pinned the requirement to one vendor's container. Now Anthropic / OpenRouter / z-ai, auto-detected (`agent/llm.py`) |
+| FR-3  | MUST     | Agent calls an LLM for diagnosis; falls back to rule-based on any error. | **MET, RESTATED** — was "GLM-4-Plus via z-ai CLI", which pinned the requirement to one vendor's container. Now Anthropic / OpenRouter / z-ai, auto-detected (`agent/llm.py`), schema-constrained structured output (`DIAGNOSIS_SCHEMA`) re-validated locally |
 | FR-4  | MUST     | Patcher applies a bounded edit to an allowed target file. | **MET, WIDENED** — string replace plus three structural YAML actions; a string-only patcher could not handle a variable name it had not seen |
 | FR-5  | MUST     | Patcher validates the patched file is still valid YAML before writing. | **MET** — `agent/patcher.py`, asserted byte-unchanged on rejection |
 | FR-6  | MUST     | Committer creates a conventional-commit scoped to the touched file's directory. | **MET** — `agent/committer.py` |
@@ -194,7 +194,11 @@ repeatedly proposes patches that don't actually fix the underlying problem.
 | NFR-2 | MUST     | Agent never writes outside `ANSIBLE_HEAL_ALLOWED_PATHS` globs (default: `ansible/**`). | **MET** — the env var previously appeared nowhere in the codebase; enforced in `agent/patcher.py`, `tests/test_safety.py` |
 | NFR-3 | MUST     | Agent never force-pushes, never rewrites history, never touches main without `--require-human-approval` in PR-mode. | **MET** — the flag previously did not exist; asserted by base-branch-SHA-unchanged tests |
 | NFR-4 | MUST     | Agent is idempotent: re-running `heal()` on an already-green pipeline is a no-op. | **MET** — asserted by commit count, not by inspection |
-| NFR-5 | SHOULD   | Agent emits OpenTelemetry spans for each component. | **IMPLEMENTED** — `agent/telemetry.py`; GenAI semconv on LLM calls; optional `[otel]` extra; `tests/test_telemetry.py` |
+| NFR-5 | SHOULD   | Agent emits OpenTelemetry spans for each component. | **MET** — `agent/telemetry.py`; GenAI semconv on LLM calls; optional `[otel]` extra; `tests/test_telemetry.py` |
+| X-1   | ADDED    | Measured heal rate and false-fix rate. | **MET** — `ansible-heal eval`, CI-gated at ≥90% heal / 0 false fixes |
+| X-2   | ADDED    | Findings consumable by code-scanning tools. | **MET** — SARIF 2.1.0 (`--sarif`), composite `action.yml` |
+| X-3   | ADDED    | Other agents can query the agent without write access. | **MET** — read-only stdio MCP server (`ansible-heal mcp`) |
+| X-4   | ADDED    | Missing collection dependencies are declared, not installed. | **MET** — `declare_collection` action, `ansible-galaxy`-verified |
 | NFR-6 | WON'T    | Agent does not perform multi-region failover or capacity planning. | n/a |
 
 Each MUST requirement is covered by at least one test and exercised end-to-end

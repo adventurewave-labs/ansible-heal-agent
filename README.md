@@ -406,6 +406,28 @@ steps:
 Findings land in pull-request annotations and Security → Code scanning. Inputs
 reach the shell through `env:`, never interpolated into the script.
 
+## MCP server
+
+`ansible-heal mcp` serves the agent over the Model Context Protocol (stdio,
+JSON-RPC 2.0, stdlib only), so another agent can ask what is broken and what
+this one would change:
+
+```bash
+claude mcp add ansible-heal -- ansible-heal mcp
+```
+
+| tool | returns |
+|---|---|
+| `diagnose` | dry-run findings for a repo path: failure, diagnosis, proposed diff, or the decline / block reason |
+| `explain_decline` | for one failure, whether the agent would fix it and why — or why not |
+| `list_failure_classes` | classes and their SARIF rule ids |
+
+It is **read-only by construction**: there is no apply tool, every tool is
+annotated `readOnlyHint`, runs in dry-run mode with the target repo's own
+inventory plugins disabled, and writes its artefacts outside the repository.
+Committing to someone's infrastructure stays a decision made at a terminal,
+not one delegated to whatever model is on the other end of the pipe.
+
 ## Measuring it
 
 ```console
@@ -438,7 +460,7 @@ model path through the same gates, so the two are directly comparable.
 ## Tests
 
 ```bash
-make test          # 312 tests
+make test          # 320 tests
 make lint
 ```
 
@@ -475,6 +497,9 @@ Honest list of what is **not** here:
   collection present
 - a heal-rate figure on a corpus of *real* broken repositories — `make eval`
   measures a generated corpus, which is necessary but not the same thing
+- an LLM-path eval number: `ansible-heal eval --llm` exists, but no published
+  figure yet (it needs a provider key in CI)
+- remediation for `ssh_conn_refused` (FR-11) and Slack notification (FR-12)
 
 See [PRD.md](PRD.md) for requirement-by-requirement status and
 [PLAN.md](PLAN.md) for how it was built.

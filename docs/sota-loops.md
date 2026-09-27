@@ -22,7 +22,7 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
   declared or ambiguous.
 - [x] **L4 — SARIF + GitHub Action.** SARIF 2.1.0 for proposals and declines;
   composite `action.yml` running dry-run and uploading to code scanning.
-- [ ] **L5 — MCP server.** Read-only stdio MCP server exposing diagnose,
+- [x] **L5 — MCP server.** Read-only stdio MCP server exposing diagnose,
   dry-run and explain-decline as tools. Final docs/PR pass.
 
 ## Log
@@ -33,3 +33,4 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
 - L3 — missing-collection class shipped: `ansible-galaxy`-verified, `declare_collection` action (the only action allowed to create its target), round-trip append preserving roles/comments, five decline paths; module-class runs now end with the dependency declared and an explicit install instruction; 14 new tests.
 - L4 — `--sarif` / `--fail-on-findings` on dry-run (`agent/sarif.py`), composite `action.yml` uploading to code scanning (injection-safe env inputs), dogfood CI job; 11 new tests.
 - L4 — also fixed a CI failure on py3.10 / ansible-core 2.17 from L3: `ansible-galaxy collection list` exits 5 with "None of the provided paths were usable" when no collections dir exists; now read as "not installed". Verified locally on py3.10 + ansible-core 2.17.14.
+- L5 — read-only stdio MCP server (`ansible-heal mcp`: diagnose, explain_decline, list_failure_classes; no apply tool) shipped; README/PRD final pass; 8 new tests.
