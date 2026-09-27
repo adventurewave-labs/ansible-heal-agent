@@ -16,7 +16,7 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
 - [x] **L2 — Heal-rate eval harness.** `ansible-heal eval` over a generated
   perturbation corpus: heal rate, false-fix rate, decline rate, iterations —
   JSON + Markdown report.
-- [ ] **L3 — Missing-collection class.** When a module resolves only via an
+- [x] **L3 — Missing-collection class.** When a module resolves only via an
   uninstalled collection, declare it in `collections/requirements.yml`
   (ansible-galaxy format) instead of stalling red; declines when already
   declared or ambiguous.
@@ -30,3 +30,4 @@ follow-up loops, one backlog item each. Every item lands with tests, keeps
 - L0 — structured outputs shipped; 12 new tests (`tests/test_structured_output.py`).
 - L1 — OpenTelemetry spans shipped (`agent/telemetry.py`, `[otel]` extra, GenAI semconv incl. token + cache-read usage); PRD NFR-5 → implemented; 7 new tests.
 - L2 — `ansible-heal eval` / `make eval` shipped (`agent/evaluation.py`): 20-case corpus (16 heal, 4 must-decline), heal 100%, false-fix 0%, decline precision 100% on the deterministic path; gated CI job with job-summary table; 9 new tests.
+- L3 — missing-collection class shipped: `ansible-galaxy`-verified, `declare_collection` action (the only action allowed to create its target), round-trip append preserving roles/comments, five decline paths; module-class runs now end with the dependency declared and an explicit install instruction; 14 new tests.

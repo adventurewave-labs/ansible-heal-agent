@@ -19,7 +19,7 @@ patches the offending inventory / playbooks / vars, commits the fix, and re-runs
 
 ## What it does, precisely
 
-Three failure classes, against **real `ansible-playbook`** or against a bundled
+Four failure classes, against **real `ansible-playbook`** or against a bundled
 simulator:
 
 | class | detected via | fix | verified against real Ansible |
@@ -27,6 +27,7 @@ simulator:
 | host pattern matches nothing | callback plugin — real Ansible logs a *warning* and exits **0** | rename the closest inventory entry | heals to green |
 | undefined variable | callback plugin (name extracted) | define it in `group_vars` with an inferred default | heals to green |
 | unresolvable / removed module | text scan — parse errors abort before callbacks fire (exit 4) | swap the module for its modern equivalent | rewrite verified; see below |
+| module from an uninstalled collection | same text scan; `ansible-galaxy collection list` confirms the collection is absent | **declare** it in `collections/requirements.yml` — never install | declaration verified; install is the operator's |
 
 The first two are asserted end to end in `tests/test_real_ansible.py`: real
 `ansible-playbook` fails, the agent patches, and the binary is run again and
@@ -35,9 +36,19 @@ exits 0.
 The module class is honest about where it stops. The agent rewrites the module
 name and the run no longer fails on the old one — but the replacement for
 `docker` / `docker_container` lives in the `community.docker` **collection**, so
-the play only reaches green once that collection is installed. Installing it is
-the operator's call, not the agent's, and the stall detector stops the loop
-rather than re-proposing the same swap. Argument carry-over is per-module: the
+the play only reaches green once that collection is installed. So the agent
+takes the one step that is its to take: it asks `ansible-galaxy` whether
+`community.docker` is installed and, when it is not, **declares** it in the
+repo's collections requirements file (an existing one if the repo has one,
+otherwise the first candidate inside the write surface), as its own
+`fix(deps)` commit. That is what makes the dependency reviewable, and it is
+what AWX / Automation Controller install from on their own. Installing it on
+this control node is the operator's call, not the agent's: the next iteration
+reports `declared in <file> but not installed — run ansible-galaxy collection
+install -r <file>` and stops. It declines, rather than guesses, when the
+collection *is* installed but lacks the module (a typo or version mismatch),
+when `ansible-galaxy` cannot answer, when the existing file is a legacy roles
+list, or when the name is not a valid collection name. Argument carry-over is per-module: the
 `docker` mappings pass the task's arguments through unchanged, while `apt_key`
 → `get_url` deliberately rewrites them, because a keyring fetch does not take
 the same arguments as a key import.
@@ -398,7 +409,7 @@ model path through the same gates, so the two are directly comparable.
 ## Tests
 
 ```bash
-make test          # 287 tests
+make test          # 301 tests
 make lint
 ```
 
@@ -427,7 +438,7 @@ make lint
 
 Honest list of what is **not** here:
 
-- more failure classes (this handles three)
+- more failure classes (this handles four)
 - `MODULE_REPLACEMENTS` covers `apt_key`, `docker`, `docker_container` — and
   note that on ansible-core 2.19 `apt_key` still *resolves*, so that mapping is
   a modernisation rather than a fix for a broken play

@@ -322,12 +322,14 @@ def test_a_module_swap_that_cannot_converge_stops_instead_of_looping(real_repo):
     """The stall detector is what keeps an unconvergeable class from spinning.
 
     Re-proposing the same swap for three iterations would burn the retry budget
-    and write three identical commits. One iteration, then stop.
+    and write three identical commits. Two productive iterations — the swap,
+    then declaring the replacement's collection — and then stop.
     """
     result = heal(playbook="ansible/playbooks/module.yml", max_retries=3,
                   use_llm=False)
     assert not result.success
-    assert result.iterations <= 1, f"looped {result.iterations} times on a stuck fix"
+    assert result.iterations <= 2, f"looped {result.iterations} times on a stuck fix"
+    assert any("is declared in" in d for d in result.declined), result.declined
 
 
 def test_dry_run_against_real_ansible_writes_nothing(real_repo):
