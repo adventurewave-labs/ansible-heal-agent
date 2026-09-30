@@ -35,8 +35,10 @@ import sys
 from pathlib import Path
 from typing import Any, TextIO
 
+from agent import __version__
+
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_INFO = {"name": "ansible-heal-agent", "version": "0.1.0"}
+SERVER_INFO = {"name": "ansible-heal-agent", "version": __version__}
 
 TOOLS: list[dict[str, Any]] = [
     {

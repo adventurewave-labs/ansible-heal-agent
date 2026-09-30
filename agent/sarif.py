@@ -154,8 +154,10 @@ def _result(proposal: Any) -> dict[str, Any]:
     return out
 
 
-def to_sarif(result: Any, version: str = "0.1.0") -> dict[str, Any]:
+def to_sarif(result: Any, version: str | None = None) -> dict[str, Any]:
     """Build a SARIF 2.1.0 log from a (dry-run) :class:`HealResult`."""
+    if version is None:
+        from agent import __version__ as version
     rules = [{
         "id": rid,
         "name": r["name"],

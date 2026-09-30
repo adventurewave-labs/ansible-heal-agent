@@ -1,7 +1,7 @@
 # Project metadata
 [project]
 name = "ansible-heal-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autonomous agent that scans Ansible logs, diagnoses failures, patches playbooks, commits, and re-runs the pipeline."
 readme = "README.md"
 requires-python = ">=3.10"

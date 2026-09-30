@@ -396,7 +396,7 @@ permissions:
   security-events: write
 steps:
   - uses: actions/checkout@v4
-  - uses: adventurewave-labs/ansible-heal-agent@main
+  - uses: adventurewave-labs/ansible-heal-agent@v0
     with:
       playbook: ansible/playbooks/site.yml
       runner: real            # or mock

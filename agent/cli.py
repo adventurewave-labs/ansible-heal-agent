@@ -6,7 +6,7 @@ import time
 
 import click
 
-from agent import config
+from agent import __version__, config
 from agent.core import MODE_APPLY, MODE_DRY_RUN, MODE_PR, Transcript, heal
 
 
@@ -22,7 +22,7 @@ def _apply_common(repo: str | None, allowed_paths: str | None) -> None:
 
 
 @click.group()
-@click.version_option("0.1.0")
+@click.version_option(__version__)
 def cli():
     """ansible-heal-agent — autonomous Ansible pipeline healer."""
     # Ships spans over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set and the
