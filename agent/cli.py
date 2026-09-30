@@ -6,7 +6,7 @@ import time
 
 import click
 
-from agent import config
+from agent import __version__, config
 from agent.core import MODE_APPLY, MODE_DRY_RUN, MODE_PR, Transcript, heal
 
 
@@ -22,9 +22,13 @@ def _apply_common(repo: str | None, allowed_paths: str | None) -> None:
 
 
 @click.group()
-@click.version_option("0.1.0")
+@click.version_option(__version__)
 def cli():
     """ansible-heal-agent — autonomous Ansible pipeline healer."""
+    # Ships spans over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set and the
+    # [otel] extra is installed; otherwise a no-op.
+    from agent import telemetry
+    telemetry.configure_from_env()
 
 
 @cli.command()
@@ -52,13 +56,24 @@ def cli():
               help="Disable the LLM; use the deterministic diagnoser only.")
 @click.option("--transcript/--no-transcript", default=True,
               help="Write a Markdown transcript under transcripts/.")
+@click.option("--sarif", "sarif_path", default=None, metavar="PATH",
+              help="With --dry-run: also write findings as SARIF 2.1.0 to PATH "
+                   "(for GitHub code scanning).")
+@click.option("--fail-on-findings", is_flag=True, default=False,
+              help="With --dry-run: exit 2 when any failure was found, even if "
+                   "a SARIF file was written (default: exit 0 once reported).")
 def run(repo, playbook, max_retries, allowed_paths, dry_run,
-        require_human_approval, remote, no_llm, transcript):
+        require_human_approval, remote, no_llm, transcript, sarif_path,
+        fail_on_findings):
     """Run the heal loop once and report the result."""
     if dry_run and require_human_approval:
         raise click.UsageError(
             "--dry-run and --require-human-approval are mutually exclusive: "
             "one writes nothing at all, the other writes to a branch.")
+
+    if (sarif_path or fail_on_findings) and not dry_run:
+        raise click.UsageError(
+            "--sarif and --fail-on-findings report dry-run proposals; add --dry-run.")
 
     _apply_common(repo, allowed_paths)
     mode = MODE_DRY_RUN if dry_run else MODE_PR if require_human_approval else MODE_APPLY
@@ -125,6 +140,15 @@ def run(repo, playbook, max_retries, allowed_paths, dry_run,
 
     click.echo(f"\nSuccess: {result.success}  Iterations: {result.iterations}  "
                f"Final exit: {result.final_exit_code}")
+    if sarif_path:
+        from agent import sarif
+        out = sarif.write(result, sarif_path)
+        click.echo(f"sarif: {out}  ({len(result.proposals)} result(s))")
+        # Findings reported as SARIF are the output, not a crash: code
+        # scanning needs the upload step to run. --fail-on-findings restores
+        # a failing exit for pipelines that want to gate on them.
+        found = bool(result.proposals)
+        raise SystemExit(2 if (found and fail_on_findings) else 0)
     raise SystemExit(0 if result.success else 2)
 
 
@@ -146,6 +170,72 @@ def status(repo):
         click.echo(logs[-1].read_text()[:2000])
     else:
         click.echo("no runs yet")
+
+
+@cli.command(name="eval")
+@click.option("--out", "out_dir", default="eval-report", show_default=True,
+              help="Directory for eval-report.json and eval-report.md.")
+@click.option("--runner", type=click.Choice(["mock", "real"]), default="mock",
+              show_default=True, help="Pipeline runner (real = ansible-playbook).")
+@click.option("--llm/--no-llm", "use_llm", default=False, show_default=True,
+              help="Score the LLM path instead of the deterministic one.")
+@click.option("--filter", "name_filter", default=None,
+              help="Only run cases whose name contains this substring.")
+@click.option("--min-heal-rate", type=float, default=None,
+              help="Exit non-zero if the heal rate falls below this (0-1).")
+@click.option("--max-false-fix-rate", type=float, default=None,
+              help="Exit non-zero if the false-fix rate exceeds this (0-1).")
+def eval_cmd(out_dir, runner, use_llm, name_filter, min_heal_rate,
+             max_false_fix_rate):
+    """Measure heal rate and false-fix rate over a generated corpus.
+
+    Every case runs in its own throwaway git repo; nothing here touches the
+    repository you run it from.
+    """
+    import os
+    from pathlib import Path
+
+    from agent import evaluation
+
+    os.environ["PIPELINE_RUNNER"] = runner
+    cases = evaluation.build_corpus()
+    if name_filter:
+        cases = [c for c in cases if name_filter in c.name]
+    if not cases:
+        raise click.UsageError("no corpus case matches --filter")
+
+    def progress(r):
+        mark = "ok  " if r.correct else "FAIL"
+        click.echo(f"{mark} {r.outcome:<9} {r.name}  ({r.seconds}s)")
+
+    report = evaluation.run_eval(cases, use_llm=use_llm, progress=progress)
+    j, m = evaluation.write_report(report, Path(out_dir))
+    s = report["summary"]
+    click.echo("")
+    click.echo(f"heal rate: {evaluation._pct(s['heal_rate'])}   "
+               f"false-fix rate: {evaluation._pct(s['false_fix_rate'])}   "
+               f"decline precision: {evaluation._pct(s['decline_precision'])}")
+    click.echo(f"report: {j}  {m}")
+
+    failed = []
+    if min_heal_rate is not None and (s["heal_rate"] or 0) < min_heal_rate:
+        failed.append(f"heal rate {s['heal_rate']} < {min_heal_rate}")
+    if (max_false_fix_rate is not None and s["false_fix_rate"] is not None
+            and s["false_fix_rate"] > max_false_fix_rate):
+        failed.append(f"false-fix rate {s['false_fix_rate']} > {max_false_fix_rate}")
+    for f in failed:
+        click.echo(f"GATE FAILED: {f}", err=True)
+    raise SystemExit(1 if failed else 0)
+
+
+@cli.command(name="mcp")
+def mcp_cmd():
+    """Serve read-only diagnose/explain tools over MCP (stdio).
+
+    Register with a client, e.g. `claude mcp add ansible-heal -- ansible-heal mcp`.
+    """
+    from agent import mcp_server
+    mcp_server.serve()
 
 
 def main():

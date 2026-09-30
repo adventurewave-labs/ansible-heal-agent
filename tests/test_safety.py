@@ -204,11 +204,12 @@ def test_two_plays_contending_for_one_host_do_not_oscillate(scratch_repo):
 
     result = heal(max_retries=3, use_llm=False)
 
-    # The other two seeded failures still heal, so one productive iteration is
-    # expected. What must not happen is a second, third and fourth spent
-    # renaming the same entry back and forth.
+    # The other seeded failures still heal: one iteration for the variable and
+    # the module swap, one more to declare the swapped module's collection.
+    # What must not happen is a third and fourth spent renaming the same entry
+    # back and forth.
     assert not result.success
-    assert result.iterations <= 1, (
+    assert result.iterations <= 2, (
         f"burned {result.iterations} iterations on a fix that cannot converge")
 
     log = _git(scratch_repo, "log", "--oneline")

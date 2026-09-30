@@ -37,6 +37,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from agent import telemetry
+
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
@@ -53,8 +55,8 @@ PROVIDERS = ("anthropic", "openrouter", "z-ai")
 
 #: Per-provider default model, overridable with MODEL_ENV.
 PROVIDER_MODELS = {
-    "anthropic": "claude-sonnet-4-5",
-    "openrouter": "anthropic/claude-sonnet-4.5",
+    "anthropic": "claude-sonnet-5",
+    "openrouter": "anthropic/claude-sonnet-5",
     "z-ai": "glm-4-plus",
 }
 
@@ -73,6 +75,23 @@ BACKOFF_SECONDS = 1.0
 DEFAULT_MODEL = PROVIDER_MODELS["anthropic"]
 
 _REDACTED = "***REDACTED***"
+
+#: Token usage reported by the most recent HTTP completion, normalised to
+#: ``{"input", "output", "cache_read"}``. Read by :func:`chat` for telemetry.
+_last_usage: dict[str, int] = {}
+
+
+def _record_usage(data: dict) -> None:
+    usage = data.get("usage") if isinstance(data, dict) else None
+    _last_usage.clear()
+    if not isinstance(usage, dict):
+        return
+    pairs = {
+        "input": usage.get("input_tokens", usage.get("prompt_tokens")),
+        "output": usage.get("output_tokens", usage.get("completion_tokens")),
+        "cache_read": usage.get("cache_read_input_tokens"),
+    }
+    _last_usage.update({k: v for k, v in pairs.items() if isinstance(v, int)})
 
 # Where the z-ai CLI backend caches its JSON output between calls.
 _TMP_DIR = Path(tempfile.gettempdir()) / "ansible-heal-agent"
@@ -117,6 +136,18 @@ class LLMError(RuntimeError):
 
 class _Transient(Exception):
     """Internal: a provider failure worth retrying. Never escapes this module."""
+
+
+class _Fatal(Exception):
+    """Internal: a provider failure retrying cannot fix (bad key, bad request).
+
+    Retrying a 401 or a 400 spends the backoff budget and the operator's quota
+    on a request that is guaranteed to fail the same way.
+    """
+
+
+#: HTTP statuses worth another attempt. Everything else in 4xx is final.
+RETRYABLE_HTTP = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
 
 
 # --------------------------------------------------------------------------
@@ -216,7 +247,8 @@ def _post_json(url: str, headers: dict, payload: dict, label: str) -> dict:
             detail = exc.read().decode("utf-8", "replace")[:400]
         except Exception:  # noqa: BLE001 - the error body is best-effort only
             detail = ""
-        raise _Transient(f"{label} returned HTTP {exc.code}: {detail}") from None
+        err = _Transient if exc.code in RETRYABLE_HTTP else _Fatal
+        raise err(f"{label} returned HTTP {exc.code}: {detail}") from None
     except urllib.error.URLError as exc:
         raise _Transient(f"{label} network error: {exc.reason}") from None
     except TimeoutError:
@@ -238,7 +270,9 @@ def _post_json(url: str, headers: dict, payload: dict, label: str) -> dict:
 # --------------------------------------------------------------------------
 
 
-def _chat_anthropic(prompt: str, system: str | None, model: str) -> str:
+def _chat_anthropic(
+    prompt: str, system: str | None, model: str, schema: dict | None = None
+) -> str:
     key = os.environ.get(PROVIDER_KEY_ENV["anthropic"], "").strip()
     headers = {
         "x-api-key": key,
@@ -252,11 +286,38 @@ def _chat_anthropic(prompt: str, system: str | None, model: str) -> str:
     }
     if system:
         payload["system"] = system
+    if schema:
+        # Structured output: a single forced tool whose input_schema *is* the
+        # diagnosis contract, so the model cannot answer in prose. The system
+        # prompt is marked cacheable — it is identical for every failure in a
+        # run, so iterations after the first read it from the prompt cache.
+        payload["tools"] = [{
+            "name": schema["name"],
+            "description": schema.get("description", ""),
+            "input_schema": schema["schema"],
+        }]
+        payload["tool_choice"] = {"type": "tool", "name": schema["name"]}
+        if system:
+            payload["system"] = [{
+                "type": "text", "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }]
 
     data = _post_json(ANTHROPIC_URL, headers, payload, "anthropic")
+    _record_usage(data)
     blocks = data.get("content")
     if not isinstance(blocks, list):
         raise _Transient("anthropic response had no 'content' list")
+    if schema:
+        for block in blocks:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == schema["name"]
+                and isinstance(block.get("input"), dict)
+            ):
+                return json.dumps(block["input"])
+        raise _Transient(f"anthropic returned no '{schema['name']}' tool_use block")
     parts = [
         block.get("text", "")
         for block in blocks
@@ -265,7 +326,9 @@ def _chat_anthropic(prompt: str, system: str | None, model: str) -> str:
     return "".join(parts)
 
 
-def _chat_openrouter(prompt: str, system: str | None, model: str) -> str:
+def _chat_openrouter(
+    prompt: str, system: str | None, model: str, schema: dict | None = None
+) -> str:
     key = os.environ.get(PROVIDER_KEY_ENV["openrouter"], "").strip()
     headers = {
         "Authorization": f"Bearer {key}",
@@ -275,9 +338,19 @@ def _chat_openrouter(prompt: str, system: str | None, model: str) -> str:
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
-    payload = {"model": model, "max_tokens": MAX_TOKENS, "messages": messages}
+    payload: dict[str, Any] = {
+        "model": model, "max_tokens": MAX_TOKENS, "messages": messages,
+    }
+    if schema:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema["name"], "strict": True, "schema": schema["schema"],
+            },
+        }
 
     data = _post_json(OPENROUTER_URL, headers, payload, "openrouter")
+    _record_usage(data)
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -285,7 +358,11 @@ def _chat_openrouter(prompt: str, system: str | None, model: str) -> str:
     return content or ""
 
 
-def _chat_zai(prompt: str, system: str | None, model: str) -> str:
+def _chat_zai(
+    prompt: str, system: str | None, model: str, schema: dict | None = None
+) -> str:
+    # The z-ai CLI has no constrained-decoding mode; the schema is enforced
+    # after the fact by chat_json's validator instead.
     try:
         _TMP_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -314,7 +391,7 @@ def _chat_zai(prompt: str, system: str | None, model: str) -> str:
         raise _Transient(f"z-ai returned malformed JSON: {exc}") from None
 
 
-_BACKENDS: dict[str, Callable[[str, str | None, str], str]] = {
+_BACKENDS: dict[str, Callable[..., str]] = {
     "anthropic": _chat_anthropic,
     "openrouter": _chat_openrouter,
     "z-ai": _chat_zai,
@@ -326,7 +403,12 @@ _BACKENDS: dict[str, Callable[[str, str | None, str], str]] = {
 # --------------------------------------------------------------------------
 
 
-def chat(prompt: str, system: str | None = None, max_retries: int = 2) -> str:
+def chat(
+    prompt: str,
+    system: str | None = None,
+    max_retries: int = 2,
+    schema: dict | None = None,
+) -> str:
     """Send a single chat completion request and return the assistant's text.
 
     ``max_retries`` is the total number of attempts (2 by default), with a
@@ -338,18 +420,50 @@ def chat(prompt: str, system: str | None = None, max_retries: int = 2) -> str:
         raise LLMError(why)
 
     model = active_model()
+    with telemetry.span(
+        f"chat {model}",
+        **{
+            "gen_ai.operation.name": "chat",
+            "gen_ai.provider.name": provider,
+            "gen_ai.request.model": model,
+            "gen_ai.request.max_tokens": MAX_TOKENS,
+            "gen_ai.output.type": "json" if schema else "text",
+        },
+    ) as current:
+        text, attempts_used = _chat_attempts(
+            provider, model, prompt, system, max_retries, schema)
+        telemetry.set_attrs(current, **{
+            "ansible_heal.llm.attempts": attempts_used,
+            "gen_ai.usage.input_tokens": _last_usage.get("input"),
+            "gen_ai.usage.output_tokens": _last_usage.get("output"),
+            "gen_ai.usage.cache_read.input_tokens": _last_usage.get("cache_read"),
+        })
+        return text
+
+
+def _chat_attempts(provider, model, prompt, system, max_retries, schema):
+    """The retry loop behind :func:`chat`. Returns ``(text, attempts_used)``."""
+    _last_usage.clear()
     backend = _BACKENDS[provider]
     attempts = max(1, int(max_retries))
     last_err: str | None = None
 
     for attempt in range(1, attempts + 1):
         try:
-            content = backend(prompt, system, model)
+            content = (
+                backend(prompt, system, model, schema)
+                if schema else backend(prompt, system, model)
+            )
             if content and content.strip():
-                return content.strip()
+                return content.strip(), attempt
             last_err = f"{provider} returned an empty completion"
         except _Transient as exc:
             last_err = str(exc)
+        except _Fatal as exc:
+            raise LLMError(
+                f"{provider} request failed (not retried) using model "
+                f"'{model}': {exc}"
+            ) from None
         except Exception as exc:  # noqa: BLE001 - nothing escapes as non-LLMError
             last_err = f"{provider} backend raised {type(exc).__name__}: {exc}"
         if attempt < attempts:
@@ -361,13 +475,59 @@ def chat(prompt: str, system: str | None = None, max_retries: int = 2) -> str:
     )
 
 
-def chat_json(prompt: str, system: str | None = None) -> dict[str, Any]:
+def validate_schema(value: Any, schema: dict, path: str = "$") -> list[str]:
+    """Return every violation of ``schema`` in ``value`` (empty list = valid).
+
+    A deliberately small subset of JSON Schema — ``type``, ``properties``,
+    ``required``, ``additionalProperties: false``, ``enum``, ``minLength`` —
+    which is exactly what the diagnosis contract uses. Stdlib only, like the
+    rest of this module.
+    """
+    errors: list[str] = []
+    kind = schema.get("type")
+    checks = {
+        "object": lambda v: isinstance(v, dict),
+        "string": lambda v: isinstance(v, str),
+        "array": lambda v: isinstance(v, list),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "boolean": lambda v: isinstance(v, bool),
+    }
+    if kind in checks and not checks[kind](value):
+        return [f"{path}: expected {kind}, got {type(value).__name__}"]
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: {value!r} not one of {schema['enum']}")
+    if kind == "string" and len(value) < schema.get("minLength", 0):
+        errors.append(f"{path}: shorter than {schema['minLength']}")
+    if kind == "object":
+        props = schema.get("properties", {})
+        for key in schema.get("required", []):
+            if key not in value:
+                errors.append(f"{path}: missing required key '{key}'")
+        if schema.get("additionalProperties") is False:
+            for key in value:
+                if key not in props:
+                    errors.append(f"{path}: unexpected key '{key}'")
+        for key, sub in props.items():
+            if key in value:
+                errors.extend(validate_schema(value[key], sub, f"{path}.{key}"))
+    return errors
+
+
+def chat_json(
+    prompt: str, system: str | None = None, schema: dict | None = None
+) -> dict[str, Any]:
     """Like :func:`chat`, but parse the response as a JSON object.
 
-    The LLM is prompted to return ONLY a JSON object. If the response contains
-    surrounding markdown fences or commentary, we extract the first {...} block.
+    With ``schema`` (``{"name", "description", "schema"}``) the request uses the
+    provider's structured-output mode — a forced tool call on Anthropic,
+    ``response_format: json_schema`` on OpenRouter — and the parsed object is
+    validated against the schema regardless of provider, so a model that
+    ignores the constraint is rejected here rather than by a later gate.
+
+    Without a schema the LLM is prompted to return ONLY a JSON object; fences
+    and surrounding commentary are stripped and the outermost {...} is parsed.
     """
-    raw = chat(prompt, system=system)
+    raw = chat(prompt, system=system, schema=schema)
     # Strip ```json fences if present
     if "```" in raw:
         lines = raw.splitlines()
@@ -389,6 +549,13 @@ def chat_json(prompt: str, system: str | None = None) -> dict[str, Any]:
     if start == -1 or end == -1 or end < start:
         raise LLMError(f"LLM response contained no JSON object: {raw[:200]}")
     try:
-        return json.loads(raw[start : end + 1])
+        obj = json.loads(raw[start : end + 1])
     except json.JSONDecodeError as exc:
         raise LLMError(f"LLM response was not valid JSON: {exc}") from None
+    if schema:
+        problems = validate_schema(obj, schema["schema"])
+        if problems:
+            raise LLMError(
+                "LLM response violated the schema: " + "; ".join(problems[:5])
+            )
+    return obj

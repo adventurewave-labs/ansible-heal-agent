@@ -19,7 +19,7 @@ patches the offending inventory / playbooks / vars, commits the fix, and re-runs
 
 ## What it does, precisely
 
-Three failure classes, against **real `ansible-playbook`** or against a bundled
+Four failure classes, against **real `ansible-playbook`** or against a bundled
 simulator:
 
 | class | detected via | fix | verified against real Ansible |
@@ -27,6 +27,7 @@ simulator:
 | host pattern matches nothing | callback plugin — real Ansible logs a *warning* and exits **0** | rename the closest inventory entry | heals to green |
 | undefined variable | callback plugin (name extracted) | define it in `group_vars` with an inferred default | heals to green |
 | unresolvable / removed module | text scan — parse errors abort before callbacks fire (exit 4) | swap the module for its modern equivalent | rewrite verified; see below |
+| module from an uninstalled collection | same text scan; `ansible-galaxy collection list` confirms the collection is absent | **declare** it in `collections/requirements.yml` — never install | declaration verified; install is the operator's |
 
 The first two are asserted end to end in `tests/test_real_ansible.py`: real
 `ansible-playbook` fails, the agent patches, and the binary is run again and
@@ -35,9 +36,19 @@ exits 0.
 The module class is honest about where it stops. The agent rewrites the module
 name and the run no longer fails on the old one — but the replacement for
 `docker` / `docker_container` lives in the `community.docker` **collection**, so
-the play only reaches green once that collection is installed. Installing it is
-the operator's call, not the agent's, and the stall detector stops the loop
-rather than re-proposing the same swap. Argument carry-over is per-module: the
+the play only reaches green once that collection is installed. So the agent
+takes the one step that is its to take: it asks `ansible-galaxy` whether
+`community.docker` is installed and, when it is not, **declares** it in the
+repo's collections requirements file (an existing one if the repo has one,
+otherwise the first candidate inside the write surface), as its own
+`fix(deps)` commit. That is what makes the dependency reviewable, and it is
+what AWX / Automation Controller install from on their own. Installing it on
+this control node is the operator's call, not the agent's: the next iteration
+reports `declared in <file> but not installed — run ansible-galaxy collection
+install -r <file>` and stops. It declines, rather than guesses, when the
+collection *is* installed but lacks the module (a typo or version mismatch),
+when `ansible-galaxy` cannot answer, when the existing file is a legacy roles
+list, or when the name is not a valid collection name. Argument carry-over is per-module: the
 `docker` mappings pass the task's arguments through unchanged, while `apt_key`
 → `get_url` deliberately rewrites them, because a keyring fetch does not take
 the same arguments as a key import.
@@ -304,7 +315,14 @@ budget re-running a pipeline that cannot change.
 ## The LLM part
 
 `agent/diagnoser.py` asks a model for a structured fix and validates it against
-the same gates as everything else; if the model is unavailable, returns
+the same gates as everything else. The request uses each provider's
+structured-output mode — on Anthropic a single forced tool whose
+`input_schema` is the diagnosis contract (`DIAGNOSIS_SCHEMA`), with the system
+prompt marked for prompt caching; on OpenRouter a strict `json_schema`
+response format — and the reply is re-validated locally against the same
+schema whichever provider answered, so an off-contract answer is rejected
+before it reaches a gate. Client errors (400/401/403) fail immediately; only
+408/429/5xx are retried. As before, if the model is unavailable, returns
 malformed JSON, or proposes a patch that does not apply, the agent falls back to
 the deterministic rules and **says so in the transcript**.
 
@@ -315,6 +333,26 @@ raises, because transcripts get committed and uploaded.
 
 **With no provider configured the agent is fully deterministic**, and the demo
 says so rather than implying a model was involved.
+
+## Tracing
+
+Every component emits an OpenTelemetry span — `ansible_heal.run`,
+`ansible_heal.pipeline.run`, `ansible_heal.diagnose`, `ansible_heal.commit`,
+and one `chat <model>` span per LLM call carrying the GenAI semantic
+conventions (`gen_ai.provider.name`, `gen_ai.request.model`,
+`gen_ai.usage.input_tokens` / `output_tokens` / `cache_read.input_tokens`), so
+GenAI-aware backends show model calls, token spend and prompt-cache hits
+without custom mapping.
+
+```bash
+pip install 'ansible-heal-agent[otel]'
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ansible-heal run --repo ~/infra --dry-run
+```
+
+It is optional: without OpenTelemetry installed the instrumentation is a
+no-op, and `ANSIBLE_HEAL_OTEL=0` switches it off when it is. Spans carry
+names, counts, exit codes and paths — never prompts, completions, file
+contents or credentials; those stay in the transcript.
 
 ## The two runners
 
@@ -339,10 +377,90 @@ inventory itself and emits Ansible-shaped logs. It exists so the demo and the
 bulk of the suite run in under a second with no Ansible installed. It is a
 simulator and is labelled as one.
 
+## Code scanning (SARIF + GitHub Action)
+
+`--dry-run --sarif out.sarif` writes every finding as SARIF 2.1.0: one rule per
+failure class (`AHA001` host pattern, `AHA002` variable, `AHA003` module,
+`AHA004` missing collection, `AHA900` unclassified), located at the playbook
+line that triggered it, with the exact diff the apply mode would commit in the
+alert body. A validated fix is a `warning`, a refusal a `note`, a write the
+surface would block an `error`. Fingerprints are stable, so re-scans update
+alerts rather than duplicate them.
+
+The repository is also a composite action. It is read-only against the
+scanned repo:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@v4
+  - uses: adventurewave-labs/ansible-heal-agent@v0
+    with:
+      playbook: ansible/playbooks/site.yml
+      runner: real            # or mock
+      fail-on-findings: false
+```
+
+Findings land in pull-request annotations and Security → Code scanning. Inputs
+reach the shell through `env:`, never interpolated into the script.
+
+## MCP server
+
+`ansible-heal mcp` serves the agent over the Model Context Protocol (stdio,
+JSON-RPC 2.0, stdlib only), so another agent can ask what is broken and what
+this one would change:
+
+```bash
+claude mcp add ansible-heal -- ansible-heal mcp
+```
+
+| tool | returns |
+|---|---|
+| `diagnose` | dry-run findings for a repo path: failure, diagnosis, proposed diff, or the decline / block reason |
+| `explain_decline` | for one failure, whether the agent would fix it and why — or why not |
+| `list_failure_classes` | classes and their SARIF rule ids |
+
+It is **read-only by construction**: there is no apply tool, every tool is
+annotated `readOnlyHint`, runs in dry-run mode with the target repo's own
+inventory plugins disabled, and writes its artefacts outside the repository.
+Committing to someone's infrastructure stays a decision made at a terminal,
+not one delegated to whatever model is on the other end of the pipe.
+
+## Measuring it
+
+```console
+$ make eval          # or: ansible-heal eval [--runner real] [--llm]
+ok   healed    host/web-01->web-server-01  (1.4s)
+...
+ok   declined  decline/unrelated-host  (1.5s)
+ok   declined  decline/empty-group  (1.5s)
+
+heal rate: 100.0%   false-fix rate: 0.0%   decline precision: 100.0%
+```
+
+`agent/evaluation.py` generates a deterministic corpus — 16 cases the agent
+should heal (host renames, undefined variables, both at once) and cases it
+must **decline** (an unrelated host, an empty group, a module with no known
+replacement, a variable defined only in `host_vars`) — runs the real apply-mode
+loop against each in a throwaway git repo, and reports:
+
+| metric | meaning |
+|---|---|
+| heal rate | heal cases that ended green with a commit |
+| false-fix rate | decline cases where the agent committed anything — the number that matters |
+| decline precision | of the refusals it made, how many were right |
+
+A green pipeline with no commit does not count as a heal. Results go to
+`eval-report/eval-report.{json,md}`; CI runs it gated at ≥90% heal rate and
+zero false fixes and posts the table to the job summary. `--llm` scores the
+model path through the same gates, so the two are directly comparable.
+
 ## Tests
 
 ```bash
-make test          # 259 tests
+make test          # 320 tests
 make lint
 ```
 
@@ -371,15 +489,17 @@ make lint
 
 Honest list of what is **not** here:
 
-- more failure classes (this handles three)
+- more failure classes (this handles four)
 - `MODULE_REPLACEMENTS` covers `apt_key`, `docker`, `docker_container` — and
   note that on ansible-core 2.19 `apt_key` still *resolves*, so that mapping is
   a modernisation rather than a fix for a broken play
 - converging the module class against real Ansible, which needs the replacement
   collection present
-- OpenTelemetry spans (PRD NFR-5, `SHOULD`, not implemented)
-- a measured autonomous-heal-rate figure across a realistic corpus — the
-  perturbation suite is the harness for it, the corpus does not exist yet
+- a heal-rate figure on a corpus of *real* broken repositories — `make eval`
+  measures a generated corpus, which is necessary but not the same thing
+- an LLM-path eval number: `ansible-heal eval --llm` exists, but no published
+  figure yet (it needs a provider key in CI)
+- remediation for `ssh_conn_refused` (FR-11) and Slack notification (FR-12)
 
 See [PRD.md](PRD.md) for requirement-by-requirement status and
 [PLAN.md](PLAN.md) for how it was built.

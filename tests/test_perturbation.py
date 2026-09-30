@@ -147,7 +147,7 @@ def _assert_healed(repo: Path, variable: str, stale: str, expected: str,
             f"claimed success for variable={variable} stale={stale} "
             f"expected={expected} module={module} despite an unresolved "
             f"replacement — a false green")
-        assert any("would change nothing" in d for d in result.declined), \
+        assert any("is declared in" in d for d in result.declined), \
             result.declined
 
     inventory = (repo / "ansible" / "inventory.yml").read_text()

@@ -119,8 +119,10 @@ def main(argv: list[str] | None = None) -> int:
         remaining_types and remaining_types <= {"removed_module"})
     if not result.success:
         print("      Note: the module class needs the community.docker "
-              "collection installed to reach a real green pipeline; see the "
-              "transcript above for what the agent actually did about it.")
+              "collection installed to reach a real green pipeline. The agent "
+              "declared it in ansible/collections/requirements.yml; installing "
+              "it (ansible-galaxy collection install -r ...) is the operator's "
+              "call.")
         print()
 
     print("Done. Open the transcript to inspect the agent's reasoning.")

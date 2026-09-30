@@ -35,7 +35,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agent import committer, config, diagnoser, patcher, pipeline_restarter
+from agent import committer, config, diagnoser, patcher, pipeline_restarter, telemetry
 from agent import llm as llm_bridge
 from agent.config import repo_root
 from pipeline import git_helper
@@ -90,6 +90,23 @@ class HealResult:
             self.declined.append(reason)
 
 
+@telemetry.traced(
+    "ansible_heal.run",
+    attrs=lambda playbook="ansible/playbooks/site.yml", max_retries=3,
+    use_llm=True, transcript=None, mode="apply", remote="origin": {
+        "ansible_heal.mode": mode,
+        "ansible_heal.playbook": playbook,
+        "ansible_heal.max_retries": max_retries,
+        "ansible_heal.use_llm": use_llm,
+    },
+    result_attrs=lambda r: {
+        "ansible_heal.success": r.success,
+        "ansible_heal.iterations": r.iterations,
+        "ansible_heal.final_exit_code": r.final_exit_code,
+        "ansible_heal.declined": len(r.declined),
+        "ansible_heal.commits": sum(len(h.commits) for h in r.history),
+    },
+)
 def heal(playbook: str = "ansible/playbooks/site.yml",
          max_retries: int = 3,
          use_llm: bool = True,
@@ -175,6 +192,19 @@ def _heal_locked(playbook, max_retries, use_llm, transcript, result, mode,
     return _heal_apply(playbook, max_retries, use_llm, transcript, result)
 
 
+@telemetry.traced(
+    "ansible_heal.diagnose",
+    attrs=lambda failure, *a, **k: {
+        "ansible_heal.failure.type": failure.get("type"),
+        "ansible_heal.dry_run": k.get("dry_run", False),
+    },
+    result_attrs=lambda r: {
+        "ansible_heal.fix.applied": r[0] is not None,
+        "ansible_heal.fix.target_file": (r[0] or {}).get("target_file"),
+        "ansible_heal.diagnosis.source": (
+            "fallback" if (r[1] or {}).get("_fallback_reason") else None),
+    },
+)
 def _diagnose_and_patch(failure: dict, use_llm: bool, transcript: Transcript | None,
                         rec: IterationRecord, dry_run: bool = False):
     """Diagnose one failure and apply (or simulate) its patch.

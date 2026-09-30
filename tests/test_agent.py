@@ -173,8 +173,13 @@ def test_full_heal_loop_with_fallback(scratch_repo, git_log_count):
     result = heal(playbook="ansible/playbooks/site.yml", max_retries=3,
                   use_llm=False, transcript=None)
     assert not result.success
-    assert any("would change nothing" in d for d in result.declined), result.declined
-    assert git_log_count() == before + 3, "expected exactly one commit per fix"
+    # The swap lands, then the missing collection is *declared* (one more
+    # commit), then the agent stops: installing it is the operator's call.
+    assert any("is declared in" in d and "ansible-galaxy collection install" in d
+               for d in result.declined), result.declined
+    assert git_log_count() == before + 4, "expected exactly one commit per fix"
+    reqs = (scratch_repo / "ansible" / "collections" / "requirements.yml").read_text()
+    assert "community.docker" in reqs
 
 
 def test_heal_on_green_repo_is_a_no_op(scratch_repo, git_log_count):

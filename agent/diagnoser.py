@@ -29,7 +29,7 @@ from typing import Any
 import yaml
 
 from agent import llm, yaml_edit
-from agent.config import repo_root
+from agent.config import is_path_allowed, repo_root
 
 SYSTEM_PROMPT = (
     "You are an SRE agent specialised in Ansible. Given a single pipeline failure "
@@ -69,6 +69,43 @@ Rules:
 - For an undefined variable: add it to the group_vars file with a sensible
   default.
 """
+
+#: The diagnosis contract as JSON Schema. Sent to the provider as a
+#: structured-output constraint (forced tool call / json_schema response
+#: format) and re-checked locally, so malformed output never reaches a gate.
+#: Shaped for OpenAI-style strict mode: every property required, no extras.
+DIAGNOSIS_SCHEMA: dict[str, Any] = {
+    "name": "submit_diagnosis",
+    "description": "Submit the root cause and the smallest safe fix for one "
+                   "Ansible pipeline failure.",
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["diagnosis", "failure_type", "fix"],
+        "properties": {
+            "diagnosis": {"type": "string", "minLength": 1},
+            "failure_type": {
+                "type": "string",
+                "enum": ["unreachable_host", "no_hosts_matched",
+                         "removed_module", "undefined_variable",
+                         "missing_collection", "other"],
+            },
+            "fix": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["action", "target_file", "search", "replace",
+                             "rationale"],
+                "properties": {
+                    "action": {"type": "string", "enum": ["edit_file"]},
+                    "target_file": {"type": "string", "minLength": 1},
+                    "search": {"type": "string", "minLength": 1},
+                    "replace": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+            },
+        },
+    },
+}
 
 #: Modules removed or renamed upstream, and what to use instead. Keyed on the
 #: short name so both ``apt_key`` and ``ansible.builtin.apt_key`` resolve.
@@ -189,7 +226,7 @@ def llm_diagnose(failure: dict) -> dict[str, Any]:
         failure_json=json.dumps(failure, indent=2),
         context=_load_context(failure, repo_root()),
     )
-    return llm.chat_json(prompt, system=SYSTEM_PROMPT)
+    return llm.chat_json(prompt, system=SYSTEM_PROMPT, schema=DIAGNOSIS_SCHEMA)
 
 
 # ── deterministic rules ─────────────────────────────────────────────
@@ -795,6 +832,174 @@ def _diagnose_variable(failure: dict) -> dict[str, Any]:
     }
 
 
+# ── missing collection ─────────────────────────────────────────────
+
+#: Galaxy's own naming rule for ``namespace.collection``.
+_COLLECTION_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
+
+#: Collections that ship inside ansible-core; nothing to declare.
+_CORE_COLLECTIONS = frozenset({"ansible.builtin", "ansible.legacy"})
+
+#: Where a collections requirements file is looked for, in order. The first
+#: that exists is used; if none does, the first inside the write surface is
+#: created. ``collections/requirements.yml`` at the project root is the path
+#: AWX / Automation Controller installs from automatically.
+REQUIREMENTS_CANDIDATES = (
+    "collections/requirements.yml",
+    "collections/requirements.yaml",
+    "requirements.yml",
+    "ansible/collections/requirements.yml",
+    "ansible/collections/requirements.yaml",
+    "ansible/requirements.yml",
+)
+
+
+def collection_installed(name: str) -> bool | None:
+    """Is collection ``name`` installed where ansible-core looks? None if unknown.
+
+    Asked of ``ansible-galaxy`` from the repo root, so the repo's own
+    ``ansible.cfg`` ``collections_path`` is honoured — the same search path the
+    playbook run uses. Listing collections runs no plugin code.
+    """
+    exe = shutil.which("ansible-galaxy")
+    if not exe or not _COLLECTION_RE.match(name or ""):
+        return None
+    try:
+        proc = _run_probe(
+            [exe, "collection", "list", name, "--format", "json"],
+            cwd=str(repo_root()), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        # Some ansible-core releases exit non-zero for "not installed" rather
+        # than printing an empty object; only that wording is a definite no.
+        # ansible-core 2.17 also exits 5 with "None of the provided paths were
+        # usable" when no collections directory exists at all — which is a
+        # definite "nothing is installed", not an unanswerable question.
+        if re.search(r"unable to find|could not find|not found|"
+                     r"none of the provided paths were usable",
+                     proc.stderr or "", re.I):
+            return False
+        return None
+    try:
+        data = json.loads(proc.stdout[proc.stdout.index("{"):])
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return any(isinstance(v, dict) and name in v for v in data.values())
+
+
+def declared_collections(text: str) -> set[str] | None:
+    """Collection names a requirements file declares; None if not that format.
+
+    An empty file declares nothing. A bare YAML list is the legacy *roles*
+    format and cannot hold collections, so it is None, not an empty set.
+    """
+    if not text.strip():
+        return set()
+    try:
+        data = yaml_edit.load(text)
+    except yaml_edit.YamlEditError:
+        return None
+    if data is None:
+        return set()
+    if not isinstance(data, dict):
+        return None
+    entries = data.get("collections") or []
+    if not isinstance(entries, list):
+        return None
+    names: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, str):
+            names.add(entry.strip())
+        elif isinstance(entry, dict) and isinstance(entry.get("name"), str):
+            names.add(entry["name"].strip())
+    return names
+
+
+def _requirements_target() -> tuple[str | None, bool]:
+    """``(repo-relative path, exists)`` for the requirements file to use."""
+    root = repo_root()
+    for rel in REQUIREMENTS_CANDIDATES:
+        if (root / rel).is_file():
+            return rel, True
+    for rel in REQUIREMENTS_CANDIDATES:
+        if is_path_allowed(rel):
+            return rel, False
+    return None, False
+
+
+def _diagnose_missing_collection(module: str) -> dict[str, Any] | None:
+    """A fully-qualified module whose collection is not installed.
+
+    Returns None when ``module`` is not a collection module at all, so the
+    caller carries on with its own rules. The fix is a *declaration* in the
+    repo's collections requirements file — never an install. Installing
+    software on the control node is the operator's call; declaring the
+    dependency is what makes that call reviewable, and is what AWX /
+    Automation Controller act on by themselves.
+    """
+    parts = module.split(".")
+    if len(parts) < 3:
+        return None
+    collection = ".".join(parts[:2])
+    if collection in _CORE_COLLECTIONS:
+        return None
+    if not _COLLECTION_RE.match(collection):
+        return _no_fix(
+            f"'{collection}' is not a valid collection name, so '{module}' is "
+            f"not something a requirements file can satisfy", "missing_collection")
+
+    installed = collection_installed(collection)
+    if installed is None:
+        return _no_fix(
+            f"could not ask ansible-galaxy whether '{collection}' is installed; "
+            f"declaring a dependency on a guess is not a fix", "missing_collection")
+    if installed:
+        return _no_fix(
+            f"collection '{collection}' is installed but does not provide "
+            f"'{parts[-1]}' — a typo, a module removed in that collection's "
+            f"version, or a version pin to change deliberately",
+            "missing_collection")
+
+    rel, exists = _requirements_target()
+    if rel is None:
+        return _no_fix(
+            f"'{module}' needs the '{collection}' collection, but no collections "
+            f"requirements path is inside the write surface "
+            f"({', '.join(REQUIREMENTS_CANDIDATES)})", "missing_collection")
+    if exists:
+        declared = declared_collections(_read(rel) or "")
+        if declared is None:
+            return _no_fix(
+                f"{rel} is not in the collections requirements format (a "
+                f"legacy roles list or unparseable), so '{collection}' cannot "
+                f"be added to it safely", "missing_collection")
+        if collection in declared:
+            return _no_fix(
+                f"'{collection}' is declared in {rel} but not installed on this "
+                f"control node. Install it with `ansible-galaxy collection "
+                f"install -r {rel}` — installing software is the operator's "
+                f"call, not the agent's", "missing_collection")
+
+    return {
+        "diagnosis": f"`{module}` needs the `{collection}` collection, which is "
+                     f"not installed and not declared as a dependency.",
+        "failure_type": "missing_collection",
+        "fix": {
+            "action": "declare_collection",
+            "target_file": rel,
+            "collection": collection,
+            "create": not exists,
+            "rationale": f"declare {collection} in {rel} so `ansible-galaxy "
+                         f"collection install -r {rel}` (or AWX) installs it",
+        },
+    }
+
+
 def _find_playbook_using(module: str) -> str | None:
     """Return the repo-relative playbook that uses ``module``, if any."""
     root = repo_root()
@@ -820,6 +1025,10 @@ def _diagnose_module(failure: dict) -> dict[str, Any]:
             f"ansible-core resolves '{module}', so the play is not broken. It "
             f"may still be worth modernising, but that is a change to make "
             f"deliberately, not a repair")
+
+    collection_diag = _diagnose_missing_collection(module)
+    if collection_diag is not None:
+        return collection_diag
 
     short = module.rsplit(".", 1)[-1]
     replacement = MODULE_REPLACEMENTS.get(short)

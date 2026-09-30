@@ -105,7 +105,10 @@ def _write_atomically(target: Path, content: str) -> None:
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
-        shutil.copymode(target, tmp)
+        if target.exists():
+            shutil.copymode(target, tmp)
+        else:
+            os.chmod(tmp, 0o644)  # mkstemp's 0600 is wrong for a repo file
         os.replace(tmp, target)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -164,8 +167,22 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
             resolved_rel,
             note=f"{target_rel} resolves to {resolved_rel}")
 
+    creating = False
     if not target.exists():
-        raise PatchError(f"target_file does not exist: {target_rel}")
+        # Only an action that knows how to start a file from nothing may create
+        # one, and only when the diagnosis said so explicitly. Every other
+        # action edits an existing file, and a missing target there means the
+        # diagnosis is wrong about the repository.
+        if action not in CREATABLE or fix.get("create") is not True:
+            raise PatchError(f"target_file does not exist: {target_rel}")
+        if target.is_symlink():
+            raise PathNotAllowed(f"refusing to create {target_rel}: it is a "
+                                 f"dangling symlink")
+        creating = True
+
+    if creating:
+        return _finish(target, target_rel, action, fix, "", dry_run,
+                       bom=False, crlf=False)
 
     # Gate 2c: a hardlink shares an inode with a path the allowlist never saw,
     # and Path.resolve() cannot see it. Truncating in place would write through
@@ -198,6 +215,13 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
     # Gate 2d: never write plaintext over encrypted secrets.
     _refuse_if_vault(target, original, target_rel)
 
+    return _finish(target, target_rel, action, fix, original, dry_run,
+                   bom=bom, crlf=crlf)
+
+
+def _finish(target: Path, target_rel: str, action: str, fix: dict,
+            original: str, dry_run: bool, *, bom: bool, crlf: bool) -> dict:
+    """Compute the patch, validate it, and (unless dry-run) write it."""
     patched = ACTIONS[action](original, fix, target_rel)
 
     if patched == original:
@@ -212,6 +236,8 @@ def apply_fix(fix: dict[str, Any], dry_run: bool = False) -> dict[str, Any]:
         if bom:
             restored = "\ufeff" + restored
         try:
+            if not target.parent.exists():
+                target.parent.mkdir(parents=True)
             _write_atomically(target, restored)
         except OSError as e:
             # Read-only tree, wrong owner, full disk. A reported failure, not a
@@ -273,7 +299,48 @@ def _act_replace_module(original: str, fix: dict, target_rel: str) -> str:
         raise PatchError(f"{target_rel}: {e}") from e
 
 
+def _act_declare_collection(original: str, fix: dict, target_rel: str) -> str:
+    """Add ``fix["collection"]`` to a collections requirements file.
+
+    Existing entries, ``roles:`` and comments survive (round-trip YAML). A
+    collection already declared returns the input unchanged, which the caller
+    reports as a patch that would change nothing.
+    """
+    import re
+    name = fix.get("collection") or ""
+    if not re.match(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$", name):
+        raise PatchError(f"declare_collection: invalid collection name {name!r}")
+    if not original.strip():
+        return f"---\ncollections:\n  - name: {name}\n"
+    try:
+        data = yaml_edit.load(original)
+    except yaml_edit.YamlEditError as e:
+        raise PatchError(f"{target_rel}: {e}") from e
+    if data is None:
+        return f"---\ncollections:\n  - name: {name}\n"
+    if not isinstance(data, dict):
+        raise PatchError(f"{target_rel} is a legacy roles list, not a "
+                         f"collections requirements file")
+    entries = data.get("collections")
+    if entries is None:
+        data["collections"] = [{"name": name}]
+    elif not isinstance(entries, list):
+        raise PatchError(f"{target_rel}: 'collections' is not a list")
+    else:
+        for entry in entries:
+            existing = entry if isinstance(entry, str) else (
+                entry.get("name") if isinstance(entry, dict) else None)
+            if isinstance(existing, str) and existing.strip() == name:
+                return original
+        entries.append({"name": name})
+    return yaml_edit.dump(data, explicit_start=yaml_edit.has_document_start(original))
+
+
+#: Actions allowed to create their target file when it does not exist yet.
+CREATABLE = frozenset({"declare_collection"})
+
 ACTIONS = {
+    "declare_collection": _act_declare_collection,
     "edit_file": _act_edit_file,
     "set_yaml_key": _act_set_yaml_key,
     "rename_host": _act_rename_host,

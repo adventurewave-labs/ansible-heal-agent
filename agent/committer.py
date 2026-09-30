@@ -3,9 +3,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent import telemetry
 from pipeline import git_helper
 
 
+@telemetry.traced(
+    "ansible_heal.commit",
+    attrs=lambda fix, diagnosis: {
+        "ansible_heal.fix.target_file": fix.get("target_file"),
+        "ansible_heal.failure.type": diagnosis.get("failure_type"),
+    },
+    result_attrs=lambda sha: {"vcs.ref.head.revision": sha or None},
+)
 def commit_fix(fix: dict[str, Any], diagnosis: dict[str, Any]) -> str:
     """Stage the file touched by `fix` and commit with a conventional message.
 
@@ -85,6 +94,8 @@ def _build_message(fix: dict, diagnosis: dict) -> str:
 
 
 def _scope_for_file(path: str) -> str:
+    if path.endswith(("requirements.yml", "requirements.yaml")):
+        return "deps"
     if "inventory" in path:
         return "inventory"
     if "group_vars" in path:
@@ -105,4 +116,7 @@ def _summary_for_type(ftype: str, diagnosis: dict) -> str:
         return "migrate deprecated module to modern equivalent"
     if ftype == "undefined_variable":
         return "add missing variable to group_vars"
+    if ftype == "missing_collection":
+        coll = (diagnosis.get("fix") or {}).get("collection", "collection")
+        return f"declare required collection {coll}"
     return "apply automated fix"
