@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.svg" alt="ansible-heal-agent — animated banner" width="100%"></p>
+
 # ansible-heal-agent
 
 An agent that watches an Ansible pipeline, diagnoses the failures it produces,
