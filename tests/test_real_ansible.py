@@ -433,6 +433,35 @@ def test_probe_recovery_covers_every_configured_source(scratch_repo):
         f"surfacing as a host means the sources were comma-joined: {hosts}")
 
 
+def test_probe_recovery_refuses_a_partial_view(scratch_repo):
+    """One valid source and one malformed source, both configured, behind a
+    world-writable cfg: ansible-core answers with the hosts of the file that
+    parses and a warning about the one that does not. That is a partial view
+    of the configured inventory, and recovery must refuse it (None) — "the
+    hosts I can see" is not "the hosts that exist", and a rename must never
+    be decided on the first."""
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/primary.yml,ansible/broken.yml\n")
+    _write(scratch_repo, "ansible/primary.yml", """
+        all:
+          hosts:
+            web-01:
+    """)
+    _write(scratch_repo, "ansible/broken.yml", "\tthis: is: not: valid: yaml:\n")
+
+    scratch_repo.chmod(0o777)
+    try:
+        hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    finally:
+        scratch_repo.chmod(0o755)
+
+    assert hosts is None, (
+        "a partially parsed inventory must not be presented as a complete "
+        f"host list: {hosts}")
+
+
 # ── configuration errors ─────────────────────────────────────────────
 
 def test_requesting_the_real_runner_without_ansible_is_an_error(
