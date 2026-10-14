@@ -462,6 +462,48 @@ def test_probe_recovery_refuses_a_partial_view(scratch_repo):
         f"host list: {hosts}")
 
 
+def test_probe_distrusts_answers_from_behind_an_ignored_cfg(
+        scratch_repo, monkeypatch):
+    """When ansible-core ignores the repository's ansible.cfg — a
+    world-writable directory — an answer that still came back, from a
+    populated default inventory on that machine, is not this repository's
+    host list. The probe must skip it and take the explicit retry's answer.
+
+    The default-inventory fallback cannot be staged for real without
+    writing /etc, so the two probe invocations are simulated: the first
+    answers with a decoy host behind the cfg-ignored warning, the second
+    (the retry carrying the cfg's own sources) with the repository's host.
+    """
+    import subprocess as sp
+
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/inventory.yml\n")
+
+    calls: list[list[str]] = []
+
+    def fake_run_probe(argv, **kwargs):
+        calls.append(argv)
+        if "-i" not in argv:
+            return sp.CompletedProcess(
+                argv, 0,
+                '{"_meta": {"hostvars": {"decoy-from-default": {}}}}',
+                "[WARNING]: Ansible is being run in a world writable "
+                "directory (/tmp/x), ignoring it as an ansible.cfg source.")
+        return sp.CompletedProcess(
+            argv, 0, '{"_meta": {"hostvars": {"web-01": {}}}}', "")
+
+    monkeypatch.setattr(diagnoser, "_run_probe", fake_run_probe)
+
+    hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    assert hosts == {"web-01"}, (
+        "an answer produced behind an ignored ansible.cfg must not be "
+        f"accepted as this repository's host list: {hosts}")
+    assert len(calls) == 2 and "-i" in calls[1], (
+        "expected the probe to fall through to the explicit retry")
+
+
 # ── configuration errors ─────────────────────────────────────────────
 
 def test_requesting_the_real_runner_without_ansible_is_an_error(

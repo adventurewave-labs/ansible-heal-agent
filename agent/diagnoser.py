@@ -291,6 +291,16 @@ _NO_INVENTORY_RE = re.compile(
     r"|Failed to parse .*with .* plugin"
     r"|skipping inventory source", re.I)
 
+#: ansible-core's own words when it refuses the repository's ansible.cfg
+#: because the directory is world-writable. An answer produced under this
+#: warning came from ansible's *default* inventory (or the environment), not
+#: from the cfg the repository configures — on a machine with a populated
+#: /etc/ansible/hosts those are unrelated hosts, and accepting them as this
+#: repository's complete host list would ground the rename decision in the
+#: wrong inventory. The explicit retry exists for exactly this case.
+_CFG_IGNORED_RE = re.compile(
+    r"world writable directory.*ignoring it as an ansible\.cfg source", re.I)
+
 
 #: True when the operator has asked the agent to commit to this repository, so
 #: running that repository's own inventory code is no more than ansible-playbook
@@ -397,7 +407,7 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
         for source in configured:
             retry.extend(["-i", str(repo_root() / source)])
         attempts.append(retry)
-    for attempt in attempts:
+    for index, attempt in enumerate(attempts):
         try:
             proc = _run_probe(
                 attempt, cwd=str(repo_root()), stdout=subprocess.PIPE,
@@ -407,9 +417,17 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
             return None
         if proc.returncode != 0:
             continue
-        if _NO_INVENTORY_RE.search(proc.stdout + proc.stderr):
+        combined_io = proc.stdout + proc.stderr
+        if _NO_INVENTORY_RE.search(combined_io):
             # A source did not parse, so this is a partial view of the hosts.
             # A partial view is not grounds for deleting one of them.
+            continue
+        if (index == 0 and configured
+                and _CFG_IGNORED_RE.search(combined_io)):
+            # ansible-core ignored this repository's ansible.cfg, so whatever
+            # it parsed came from its default inventory or the environment —
+            # never from the sources the repository names. Not this repo's
+            # host list; the explicit retry answers that question.
             continue
         try:
             data = json.loads(proc.stdout[proc.stdout.index("{"):])
