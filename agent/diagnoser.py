@@ -384,16 +384,19 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
     # world-writable directory — ansible-core refuses to load an ansible.cfg
     # from one, so the first attempt depends on a cfg the binary just
     # ignored and parses no inventory at all, while this agent's own cfg
-    # reader did find the sources. Passing the complete configured list —
-    # never one guessed file, see ansible_resolves() for how that went — is
-    # the same view a run from outside that directory would get. Static
-    # sources only: an executable script or plugin config is code the
-    # repository supplies and dry-run does not execute it, so a view that
-    # cannot be completed is declined, not widened.
+    # reader did find the sources. Passing every configured source — never
+    # one guessed file, see ansible_resolves() for how that went — is the
+    # same view a run from outside that directory would get. Each source
+    # gets its own -i: a comma-joined value is ambiguous with ansible's
+    # inline host-list syntax, and one segment must not poison the rest.
+    # Static sources only: an executable script or plugin config is code
+    # the repository supplies and dry-run does not execute it, so a view
+    # that cannot be completed is declined, not widened.
     if configured and not _unparseable_sources_configured():
-        attempts.append(
-            [exe, "--list",
-             "-i", ",".join(str(repo_root() / s) for s in configured)])
+        retry = [exe, "--list"]
+        for source in configured:
+            retry.extend(["-i", str(repo_root() / source)])
+        attempts.append(retry)
     for attempt in attempts:
         try:
             proc = _run_probe(

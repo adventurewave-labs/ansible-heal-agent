@@ -401,6 +401,38 @@ def test_probe_recovers_when_ansible_cfg_sits_in_a_world_writable_dir(
     assert "web-01" in hosts
 
 
+def test_probe_recovery_covers_every_configured_source(scratch_repo):
+    """The retry passes each cfg-configured source as its own ``-i``. A
+    comma-joined value would be ambiguous with ansible's inline host-list
+    syntax — a filename could surface as a host — so the two-source case
+    asserts the exact combined host set: both files' hosts, and nothing
+    else, behind the same world-writable cfg the recovery exists for."""
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/primary.yml,ansible/secondary.yml\n")
+    _write(scratch_repo, "ansible/primary.yml", """
+        all:
+          hosts:
+            web-01:
+    """)
+    _write(scratch_repo, "ansible/secondary.yml", """
+        all:
+          hosts:
+            extra-09:
+    """)
+
+    scratch_repo.chmod(0o777)
+    try:
+        hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    finally:
+        scratch_repo.chmod(0o755)
+
+    assert hosts == {"web-01", "extra-09"}, (
+        "expected exactly both files' hosts and nothing else — a filename "
+        f"surfacing as a host means the sources were comma-joined: {hosts}")
+
+
 # ── configuration errors ─────────────────────────────────────────────
 
 def test_requesting_the_real_runner_without_ansible_is_an_error(
