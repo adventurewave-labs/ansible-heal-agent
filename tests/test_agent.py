@@ -170,7 +170,7 @@ def test_full_heal_loop_with_fallback(scratch_repo, git_log_count):
     collection installed, all three classes converge and the run goes green
     in one commit per fix. Both environments assert their own truth."""
     from agent.core import heal
-    from tests.conftest import replacement_resolves
+    from tests.helpers import replacement_resolves
 
     converges = replacement_resolves()
     before = git_log_count()
@@ -198,7 +198,7 @@ def test_heal_on_green_repo_is_a_no_op(scratch_repo, git_log_count):
     reached green and there is nothing left to propose. Either way: zero
     new commits, zero iterations."""
     from agent.core import heal
-    from tests.conftest import replacement_resolves
+    from tests.helpers import replacement_resolves
 
     converges = replacement_resolves()
     heal(playbook="ansible/playbooks/site.yml", max_retries=3, use_llm=False)

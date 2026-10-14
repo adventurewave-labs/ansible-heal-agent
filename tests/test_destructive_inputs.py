@@ -1365,7 +1365,7 @@ def test_the_mock_pipeline_does_not_report_a_false_green_after_an_unresolvable_s
     name and reported the pipeline healthy. `Success: True` over a playbook
     `ansible-playbook` cannot actually run is exactly the false green this
     project's own README says is worse than a false failure."""
-    from tests.conftest import replacement_resolves
+    from tests.helpers import replacement_resolves
 
     if replacement_resolves():
         pytest.skip(

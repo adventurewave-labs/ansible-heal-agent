@@ -298,7 +298,7 @@ def test_agent_rewrites_a_removed_module_against_real_ansible(real_repo):
     image and no daemon is assumed) — a different failure, but still not the
     one the swap was there to fix, and the swap remains what removed it.
     """
-    from tests.conftest import replacement_resolves
+    from tests.helpers import replacement_resolves
 
     converges = replacement_resolves()
     before = subprocess.run(
@@ -313,6 +313,11 @@ def test_agent_rewrites_a_removed_module_against_real_ansible(real_repo):
     patched = (real_repo / "ansible" / "playbooks" / "module.yml").read_text()
     assert "ansible.builtin.docker" not in patched, patched
     assert "community.docker.docker_container" in patched, patched
+    # Positive evidence the swap is what the agent did, not just what the
+    # file happens to contain: it landed as its own conventional commit.
+    subjects = subprocess.run(["git", "log", "--format=%s"], cwd=real_repo,
+                              capture_output=True, text=True).stdout
+    assert "migrate deprecated module" in subjects, subjects
 
     after = subprocess.run(
         ["ansible-playbook", "-i", "ansible/inventory.yml",
@@ -339,7 +344,7 @@ def test_a_module_swap_that_cannot_converge_stops_instead_of_looping(real_repo):
     image, no daemon), an unclassified failure with no rule — reported
     rather than looped over or self-certified.
     """
-    from tests.conftest import replacement_resolves
+    from tests.helpers import replacement_resolves
 
     converges = replacement_resolves()
     result = heal(playbook="ansible/playbooks/module.yml", max_retries=3,
@@ -347,6 +352,12 @@ def test_a_module_swap_that_cannot_converge_stops_instead_of_looping(real_repo):
     assert not result.success, (
         f"the fixture's container task cannot honestly go green: "
         f"declined={result.declined}")
+    # Positive evidence the swap actually happened, in either environment:
+    # at least one iteration ran and the migration landed as a commit.
+    assert result.iterations >= 1, "never ran the pipeline the swap fixes"
+    subjects = subprocess.run(["git", "log", "--format=%s"], cwd=real_repo,
+                              capture_output=True, text=True).stdout
+    assert "migrate deprecated module" in subjects, subjects
     assert result.iterations <= 2, f"looped {result.iterations} times on a stuck fix"
     if converges:
         assert not any("is declared in" in d for d in result.declined), (

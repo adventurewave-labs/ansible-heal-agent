@@ -64,7 +64,7 @@ def test_apply_mode_heals_and_exits_zero(scratch_repo):
     the same behaviour exercised directly against heal()); with it, the
     whole baseline heals and the CLI exits 0. All three fixes land as
     commits either way."""
-    from tests.conftest import replacement_resolves
+    from tests.helpers import replacement_resolves
 
     converges = replacement_resolves()
     res = _run(["run", "--repo", str(scratch_repo), "--no-llm", "--no-transcript"])

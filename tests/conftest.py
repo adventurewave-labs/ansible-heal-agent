@@ -57,23 +57,6 @@ def scratch_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return repo.resolve()
 
 
-def replacement_resolves(module: str = "docker") -> bool:
-    """Does this environment resolve the seeded module's replacement?
-
-    The module-class fixtures swap `ansible.builtin.docker` for
-    `community.docker.docker_container`, and that name only resolves when the
-    community.docker collection is installed. CI does not install it, but a
-    developer machine — or a CI leg that does — must not see the suite flip
-    red over an environment difference. Tests that hardcode either outcome
-    branch on this instead, consulting the same authority (ansible-doc) the
-    agent itself uses.
-    """
-    from agent import diagnoser
-
-    replacement = diagnoser.MODULE_REPLACEMENTS.get(module, {}).get("module")
-    return bool(replacement and diagnoser.module_resolves(replacement) is True)
-
-
 @pytest.fixture
 def git_log_count(scratch_repo: Path):
     """Callable returning the current commit count in the scratch repo."""
