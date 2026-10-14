@@ -367,39 +367,61 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
     # convention this agent uses, because ansible's own default is
     # /etc/ansible/hosts and it would otherwise see nothing at all.
     argv = [exe, "--list"]
+    configured: list[str] = []
     try:
         from pipeline.runner import configured_inventory_sources, inventory_path
-        if not configured_inventory_sources():
+        configured = configured_inventory_sources()
+        if not configured:
             inv = inventory_path()
             if inv.is_file():
                 argv.extend(["-i", str(inv)])
     except Exception:
         pass
-    try:
-        proc = _run_probe(
-            argv, cwd=str(repo_root()), stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, timeout=60, env=env,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    if _NO_INVENTORY_RE.search(proc.stdout + proc.stderr):
-        # A source did not parse, so this is a partial view of the hosts. A
-        # partial view is not grounds for deleting one of them.
-        return None
-    try:
-        data = json.loads(proc.stdout[proc.stdout.index("{"):])
-    except (ValueError, json.JSONDecodeError):
-        return None
-    meta = data.get("_meta", {}).get("hostvars", {})
-    hosts = {str(h) for h in meta}
-    for key, value in data.items():
-        if key == "_meta" or not isinstance(value, dict):
+    attempts = [argv]
+    # Second attempt, used only when the first could not see the inventory
+    # the repository configures: hand ansible-core that cfg's own sources
+    # explicitly. The case this exists for is a repository kept in a
+    # world-writable directory — ansible-core refuses to load an ansible.cfg
+    # from one, so the first attempt depends on a cfg the binary just
+    # ignored and parses no inventory at all, while this agent's own cfg
+    # reader did find the sources. Passing the complete configured list —
+    # never one guessed file, see ansible_resolves() for how that went — is
+    # the same view a run from outside that directory would get. Static
+    # sources only: an executable script or plugin config is code the
+    # repository supplies and dry-run does not execute it, so a view that
+    # cannot be completed is declined, not widened.
+    if configured and not _unparseable_sources_configured():
+        attempts.append(
+            [exe, "--list",
+             "-i", ",".join(str(repo_root() / s) for s in configured)])
+    for attempt in attempts:
+        try:
+            proc = _run_probe(
+                attempt, cwd=str(repo_root()), stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, timeout=60, env=env,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
             continue
-        hosts.update(str(h) for h in value.get("hosts", []) or [])
-    hosts.discard("localhost")
-    return hosts or None
+        if _NO_INVENTORY_RE.search(proc.stdout + proc.stderr):
+            # A source did not parse, so this is a partial view of the hosts.
+            # A partial view is not grounds for deleting one of them.
+            continue
+        try:
+            data = json.loads(proc.stdout[proc.stdout.index("{"):])
+        except (ValueError, json.JSONDecodeError):
+            continue
+        meta = data.get("_meta", {}).get("hostvars", {})
+        hosts = {str(h) for h in meta}
+        for key, value in data.items():
+            if key == "_meta" or not isinstance(value, dict):
+                continue
+            hosts.update(str(h) for h in value.get("hosts", []) or [])
+        hosts.discard("localhost")
+        if hosts:
+            return hosts
+    return None
 
 
 def ansible_resolves(pattern: str) -> bool | None:
@@ -710,8 +732,12 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
         return _no_fix(
             "the agent could not get a complete host list from ansible-core "
             "for this repository, so it can see only part of your inventory "
-            "and will not rename anything in it. Install ansible-core, or run "
-            "in apply mode if this repository's inventory plugins are yours to "
+            "and will not rename anything in it. Either ansible-core is not "
+            "installed, or it could not read the inventory this repository "
+            "configures: dry-run never executes the repository's own "
+            "inventory sources, and ansible-core itself refuses an "
+            "ansible.cfg kept in a world-writable directory. Run in apply "
+            "mode if this repository's inventory plugins are yours to "
             "execute", failure.get("type", "other"))
     if str(expected) in known:
         return _no_fix(
@@ -1198,7 +1224,10 @@ def _guard_inventory_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, 
     if known is None:
         return _no_fix(
             "the agent could not get a complete host list from ansible-core, "
-            "so it will not rename anything in this inventory",
+            "so it will not rename anything in this inventory. Either "
+            "ansible-core is not installed, or it could not read the "
+            "inventory this repository configures (dry-run never executes "
+            "the repository's own inventory sources)",
             failure.get("type", "other"))
     if str(as_written) in known:
         return _no_fix(

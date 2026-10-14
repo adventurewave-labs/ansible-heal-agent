@@ -374,6 +374,33 @@ def test_dry_run_against_real_ansible_writes_nothing(real_repo):
     assert (real_repo / "ansible" / "inventory.yml").read_text() == before
 
 
+def test_probe_recovers_when_ansible_cfg_sits_in_a_world_writable_dir(
+        scratch_repo):
+    """ansible-core refuses to load an ansible.cfg kept in a world-writable
+    directory — the state of every repository checked out under /tmp in a CI
+    sandbox. The restricted probe's first attempt relies on the binary reading
+    that cfg, so it parses no inventory at all and this used to return
+    "unknown", declining the rename on a message that blamed a missing
+    ansible-core (issue #20). The retry hands the cfg's own static sources to
+    the binary explicitly and recovers the complete host list — without
+    executing anything the repository supplies."""
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/inventory.yml\n")
+
+    scratch_repo.chmod(0o777)
+    try:
+        hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    finally:
+        scratch_repo.chmod(0o755)
+
+    assert hosts is not None, (
+        "the probe did not recover the host list behind a world-writable "
+        "ansible.cfg")
+    assert "web-01" in hosts
+
+
 # ── configuration errors ─────────────────────────────────────────────
 
 def test_requesting_the_real_runner_without_ansible_is_an_error(
