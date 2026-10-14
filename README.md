@@ -67,6 +67,11 @@ make demo
 
 `make demo` seeds a broken baseline into a disposable `.demo-workspace/`, heals
 it, and prints the commits it landed. It does **not** write to this checkout.
+On a machine without the `community.docker` collection installed, the run ends
+honestly red over the module class — the agent declares the collection and
+stops (see [What it does, precisely](#what-it-does-precisely)); install it
+with `ansible-galaxy collection install community.docker` and re-run to see
+the pipeline reach green.
 
 Against your own repository:
 
@@ -81,6 +86,10 @@ ansible-heal run --repo ~/infra --require-human-approval
 # Apply directly (what the demo does).
 ansible-heal run --repo ~/infra
 ```
+
+The run defaults to the playbook at `ansible/playbooks/site.yml`; pass
+`--playbook` when your entrypoint lives elsewhere (`ansible-heal run --help`
+lists every knob).
 
 ## Safety model
 

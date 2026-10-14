@@ -160,19 +160,28 @@ def test_patcher_rejects_invalid_yaml_and_does_not_write(scratch_repo):
 
 def test_full_heal_loop_with_fallback(scratch_repo, git_log_count):
     """The seeded baseline has three failure classes. The host rename and the
-    undefined variable both resolve cleanly. The module class does not: its
-    replacement, `community.docker.docker_container`, lives in a collection
-    this environment does not install, so the mock pipeline — now honestly
-    checking every module against ansible-doc rather than a fixed two-name
-    dict — correctly keeps reporting it broken after the swap, matching what
-    `ansible-playbook` itself would say (see test_real_ansible.py). The loop
-    still makes all three fixes, one commit each; it does not claim success
-    over the one it cannot actually verify."""
+    undefined variable both resolve cleanly. The module class depends on the
+    environment: `community.docker.docker_container` only resolves when that
+    collection is installed. Without it, the mock pipeline — honestly checking
+    every module against ansible-doc rather than a fixed two-name dict — keeps
+    reporting it broken after the swap, matching what `ansible-playbook`
+    itself would say (see test_real_ansible.py), and the loop declares the
+    collection and stops rather than claim success it cannot verify. With the
+    collection installed, all three classes converge and the run goes green
+    in one commit per fix. Both environments assert their own truth."""
     from agent.core import heal
+    from tests.helpers import replacement_resolves
+
+    converges = replacement_resolves()
     before = git_log_count()
     result = heal(playbook="ansible/playbooks/site.yml", max_retries=3,
                   use_llm=False, transcript=None)
-    assert not result.success
+    assert result.success == converges, (
+        f"success={result.success} expected={converges} "
+        f"declined={result.declined} blocked={result.blocked}")
+    if converges:
+        assert git_log_count() == before + 3, "expected exactly one commit per fix"
+        return
     # The swap lands, then the missing collection is *declared* (one more
     # commit), then the agent stops: installing it is the operator's call.
     assert any("is declared in" in d and "ansible-galaxy collection install" in d
@@ -183,15 +192,20 @@ def test_full_heal_loop_with_fallback(scratch_repo, git_log_count):
 
 
 def test_heal_on_green_repo_is_a_no_op(scratch_repo, git_log_count):
-    """A second run makes no further commits: the module class still cannot
-    resolve without a collection this environment does not install, and the
-    patcher's own no-op guard refuses to re-propose the identical swap."""
+    """A second run makes no further commits. Without the collection the
+    module class still cannot resolve and the patcher's own no-op guard
+    refuses to re-propose the identical swap; with it, the first run already
+    reached green and there is nothing left to propose. Either way: zero
+    new commits, zero iterations."""
     from agent.core import heal
+    from tests.helpers import replacement_resolves
+
+    converges = replacement_resolves()
     heal(playbook="ansible/playbooks/site.yml", max_retries=3, use_llm=False)
     after_first = git_log_count()
 
     result = heal(playbook="ansible/playbooks/site.yml", max_retries=3, use_llm=False)
-    assert not result.success
+    assert result.success == converges
     assert result.iterations == 0
     assert git_log_count() == after_first, "must not commit a no-op fix twice"
 

@@ -43,6 +43,60 @@ jobs:
         run: |
           git config --global user.email "ci@ansible-heal.invalid"
           git config --global user.name "CI"
+      - name: Assert this leg's precondition actually holds
+        run: |
+          python - <<'PY'
+          from tests.helpers import replacement_resolves
+          assert not replacement_resolves(), (
+              "community.docker resolves here; this leg would skip the "
+              "unresolvable-swap guard and never exercise the non-converged "
+              "branches — the collection leg covers that side")
+          print("community.docker absent; the stock branches will run")
+          PY
+      - name: Run suite with coverage gate
+        run: |
+          python -m pytest -q \
+            --cov=agent --cov=pipeline --cov=scenarios \
+            --cov-report=term-missing --cov-fail-under=78
+      - name: Assert the suite did not dirty the checkout
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::the test suite mutated the working tree"
+            git status --porcelain
+            exit 1
+          fi
+
+  test-collection:
+    # The module-class tests branch on whether community.docker resolves;
+    # the stock legs never install it, so this leg is the only place the
+    # converged branches (green heal, no declaration, the runtime-failure
+    # assertions) run in CI. The one guard whose premise needs an
+    # *unresolvable* swap skips here and runs in the stock legs.
+    name: pytest (community.docker installed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Install the collection the module class swaps to
+        run: ansible-galaxy collection install community.docker
+      - name: Assert this leg's precondition actually holds
+        run: |
+          python - <<'PY'
+          from tests.helpers import replacement_resolves
+          assert replacement_resolves(), (
+              "community.docker.docker_container does not resolve here; "
+              "this leg would silently exercise only the stock branches "
+              "and verify nothing")
+          print("community.docker resolves; the converged branches will run")
+          PY
+      - name: Configure a git identity for the scratch-repo fixtures
+        run: |
+          git config --global user.email "ci@ansible-heal.invalid"
+          git config --global user.name "CI"
       - name: Run suite with coverage gate
         run: |
           python -m pytest -q \
