@@ -400,52 +400,12 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
                 argv.extend(["-i", str(inv)])
     except Exception:
         pass
-    attempts = [argv]
-    # Second attempt, used only when the first could not see the inventory
-    # the repository configures: hand ansible-core that cfg's own sources
-    # explicitly. The case this exists for is a repository kept in a
-    # world-writable directory — ansible-core refuses to load an ansible.cfg
-    # from one, so the first attempt depends on a cfg the binary just
-    # ignored and parses no inventory at all, while this agent's own cfg
-    # reader did find the sources. Passing every configured source — never
-    # one guessed file, see ansible_resolves() for how that went — is the
-    # same view a run from outside that directory would get. Each source
-    # gets its own -i: a comma-joined value is ambiguous with ansible's
-    # inline host-list syntax, and one segment must not poison the rest.
-    # Static sources only: an executable script or plugin config is code
-    # the repository supplies and dry-run does not execute it, so a view
-    # that cannot be completed is declined, not widened.
-    if configured and not _unparseable_sources_configured():
-        retry = [exe, "--list"]
-        for source in configured:
-            retry.extend(["-i", str(repo_root() / source)])
-        attempts.append(retry)
-    for index, attempt in enumerate(attempts):
-        try:
-            proc = _run_probe(
-                attempt, cwd=str(repo_root()), stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True, timeout=60, env=env,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if proc.returncode != 0:
-            continue
-        combined_io = _unwrap(proc.stdout + proc.stderr)
-        if _NO_INVENTORY_RE.search(combined_io):
-            # A source did not parse, so this is a partial view of the hosts.
-            # A partial view is not grounds for deleting one of them.
-            continue
-        if (index == 0 and configured
-                and _CFG_IGNORED_RE.search(combined_io)):
-            # ansible-core ignored this repository's ansible.cfg, so whatever
-            # it parsed came from its default inventory or the environment —
-            # never from the sources the repository names. Not this repo's
-            # host list; the explicit retry answers that question.
-            continue
+    def _hosts_from(proc: subprocess.CompletedProcess) -> set[str] | None:
+        """The host set an accepted probe run reported, if any."""
         try:
             data = json.loads(proc.stdout[proc.stdout.index("{"):])
         except (ValueError, json.JSONDecodeError):
-            continue
+            return None
         meta = data.get("_meta", {}).get("hostvars", {})
         hosts = {str(h) for h in meta}
         for key, value in data.items():
@@ -453,9 +413,58 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
                 continue
             hosts.update(str(h) for h in value.get("hosts", []) or [])
         hosts.discard("localhost")
-        if hosts:
-            return hosts
-    return None
+        return hosts or None
+
+    try:
+        proc = _run_probe(
+            argv, cwd=str(repo_root()), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=60, env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    combined_io = _unwrap(proc.stdout + proc.stderr)
+    # ansible-core ignored this repository's ansible.cfg (a world-writable
+    # directory), so whatever it parsed came from its default inventory or
+    # the environment — never from the sources the repository names. Not
+    # this repository's host list; the fallback below answers that question.
+    cfg_was_ignored = bool(_CFG_IGNORED_RE.search(combined_io))
+    if not cfg_was_ignored:
+        if _NO_INVENTORY_RE.search(combined_io):
+            # A source did not parse, so this is a partial view of the hosts.
+            # A partial view is not grounds for deleting one of them.
+            return None
+        return _hosts_from(proc)
+
+    # Fallback, only for the condition it exists to recover — ansible-core
+    # refused the repository's ansible.cfg, so the first attempt could not
+    # have used it: hand ansible-core that cfg's own sources explicitly.
+    # Passing every configured source — never one guessed file, see
+    # ansible_resolves() for how that went — is the same view a run from
+    # outside that directory would get. Each source gets its own -i: a
+    # comma-joined value is ambiguous with ansible's inline host-list
+    # syntax, and one segment must not poison the rest. Static sources
+    # only: an executable script or plugin config is code the repository
+    # supplies and dry-run does not execute it, so a view that cannot be
+    # completed is declined, not widened.
+    if not configured or _unparseable_sources_configured():
+        return None
+    retry = [exe, "--list"]
+    for source in configured:
+        retry.extend(["-i", str(repo_root() / source)])
+    try:
+        proc = _run_probe(
+            retry, cwd=str(repo_root()), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=60, env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    if _NO_INVENTORY_RE.search(_unwrap(proc.stdout + proc.stderr)):
+        return None
+    return _hosts_from(proc)
 
 
 def ansible_resolves(pattern: str) -> bool | None:
