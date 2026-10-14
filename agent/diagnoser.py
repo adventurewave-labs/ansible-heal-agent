@@ -302,6 +302,19 @@ _CFG_IGNORED_RE = re.compile(
     r"world writable directory.*ignoring it as an ansible\.cfg source", re.I)
 
 
+def _unwrap(text: str) -> str:
+    """Collapse all whitespace to single spaces.
+
+    ansible-core word-wraps its warnings to the terminal width, and a long
+    repository path splits the very phrases these regexes key on across
+    lines — "with yaml\\nplugin:", "as an inventory\\nsource" — where ``.``
+    does not match the newline. CI's long checkout paths hit this for real:
+    a partially parsed inventory was accepted as a complete host list. Every
+    match against probe output goes through here first.
+    """
+    return re.sub(r"\s+", " ", text)
+
+
 #: True when the operator has asked the agent to commit to this repository, so
 #: running that repository's own inventory code is no more than ansible-playbook
 #: would do. False in dry-run.
@@ -417,7 +430,7 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
             return None
         if proc.returncode != 0:
             continue
-        combined_io = proc.stdout + proc.stderr
+        combined_io = _unwrap(proc.stdout + proc.stderr)
         if _NO_INVENTORY_RE.search(combined_io):
             # A source did not parse, so this is a partial view of the hosts.
             # A partial view is not grounds for deleting one of them.
@@ -510,10 +523,10 @@ def ansible_resolves(pattern: str) -> bool | None:
             return None
         if proc.returncode != 0:
             continue
-        match = re.search(r"hosts \((\d+)\)", proc.stdout)
+        match = re.search(r"hosts \((\d+)\)", _unwrap(proc.stdout))
         if match is None:
             continue
-        combined = proc.stdout + proc.stderr
+        combined = _unwrap(proc.stdout + proc.stderr)
         if _unparseable_sources_configured():
             # The probe deliberately runs without the script, auto and
             # constructed plugins, because those execute code the target repo

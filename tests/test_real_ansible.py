@@ -504,6 +504,35 @@ def test_probe_distrusts_answers_from_behind_an_ignored_cfg(
         "expected the probe to fall through to the explicit retry")
 
 
+def test_probe_markers_survive_ansible_word_wrapping(
+        scratch_repo, monkeypatch):
+    """ansible-core word-wraps its warnings to the terminal width, and a long
+    repository path splits the no-inventory phrases across lines — "with
+    yaml\\nplugin:", "as an inventory\\nsource" — where the probe's regexes
+    must still recognise them. CI's long checkout paths hit this for real
+    against ansible-core 2.17: a partially parsed inventory was accepted as
+    a complete host list."""
+    import subprocess as sp
+
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/primary.yml,ansible/broken.yml\n")
+
+    long_dir = "/very/" + "long/" * 30 + "path"
+
+    def fake_run_probe(argv, **kwargs):
+        return sp.CompletedProcess(
+            argv, 0, '{"_meta": {"hostvars": {"web-01": {}}}}',
+            f"[WARNING]:  * Failed to parse {long_dir}/broken.yml with yaml\n"
+            "plugin: We were unable to read either as JSON nor YAML")
+
+    monkeypatch.setattr(diagnoser, "_run_probe", fake_run_probe)
+
+    hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    assert hosts is None, f"a word-wrapped warning went unrecognised: {hosts}"
+
+
 # ── configuration errors ─────────────────────────────────────────────
 
 def test_requesting_the_real_runner_without_ansible_is_an_error(
