@@ -533,6 +533,30 @@ def test_probe_markers_survive_ansible_word_wrapping(
     assert hosts is None, f"a word-wrapped warning went unrecognised: {hosts}"
 
 
+def test_probe_still_answers_when_the_cfg_names_no_inventory(scratch_repo):
+    """A world-writable checkout whose ansible.cfg sets no inventory: the
+    first probe attempt carries the conventional inventory file explicitly,
+    so its answer never depended on the cfg ansible-core ignored — and must
+    not be discarded in the blanket distrust of answers from behind that
+    warning. Regression from a review round: it was, and the checkout
+    became unanswerable."""
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\nretry_files_enabled = False\n")
+
+    scratch_repo.chmod(0o777)
+    try:
+        hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    finally:
+        scratch_repo.chmod(0o755)
+
+    assert hosts is not None, (
+        "an explicit-convention answer was discarded although it never "
+        "relied on the ignored ansible.cfg")
+    assert "web-01" in hosts
+
+
 # ── configuration errors ─────────────────────────────────────────────
 
 def test_requesting_the_real_runner_without_ansible_is_an_error(

@@ -429,7 +429,13 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
     # directory), so whatever it parsed came from its default inventory or
     # the environment — never from the sources the repository names. Not
     # this repository's host list; the fallback below answers that question.
-    cfg_was_ignored = bool(_CFG_IGNORED_RE.search(combined_io))
+    # Only when the attempt actually relied on that cfg: with no configured
+    # sources it carried the conventional inventory explicitly, and that
+    # answer never depended on the cfg ansible-core ignored — discarding it
+    # would turn a world-writable checkout with an inventory-less cfg into
+    # an unanswerable one.
+    cfg_was_ignored = bool(configured) and bool(
+        _CFG_IGNORED_RE.search(combined_io))
     if not cfg_was_ignored:
         if _NO_INVENTORY_RE.search(combined_io):
             # A source did not parse, so this is a partial view of the hosts.
