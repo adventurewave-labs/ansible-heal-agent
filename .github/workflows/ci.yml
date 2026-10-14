@@ -43,6 +43,16 @@ jobs:
         run: |
           git config --global user.email "ci@ansible-heal.invalid"
           git config --global user.name "CI"
+      - name: Assert this leg's precondition actually holds
+        run: |
+          python - <<'PY'
+          from tests.helpers import replacement_resolves
+          assert not replacement_resolves(), (
+              "community.docker resolves here; this leg would skip the "
+              "unresolvable-swap guard and never exercise the non-converged "
+              "branches — the collection leg covers that side")
+          print("community.docker absent; the stock branches will run")
+          PY
       - name: Run suite with coverage gate
         run: |
           python -m pytest -q \
