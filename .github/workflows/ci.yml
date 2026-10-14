@@ -73,6 +73,16 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Install the collection the module class swaps to
         run: ansible-galaxy collection install community.docker
+      - name: Assert this leg's precondition actually holds
+        run: |
+          python - <<'PY'
+          from tests.helpers import replacement_resolves
+          assert replacement_resolves(), (
+              "community.docker.docker_container does not resolve here; "
+              "this leg would silently exercise only the stock branches "
+              "and verify nothing")
+          print("community.docker resolves; the converged branches will run")
+          PY
       - name: Configure a git identity for the scratch-repo fixtures
         run: |
           git config --global user.email "ci@ansible-heal.invalid"
