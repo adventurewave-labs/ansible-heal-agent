@@ -292,10 +292,15 @@ def test_agent_rewrites_a_removed_module_against_real_ansible(real_repo):
     The swap itself is verified against the real binary: before, ansible-core
     cannot resolve ``ansible.builtin.docker`` at all; after, that module is gone
     from the playbook and the name the agent wrote is the one ansible now looks
-    for. It does not reach green, and no wording in this repo should say it
-    does — ``community.docker`` is a Galaxy collection, and installing it is the
-    operator's decision, not the agent's.
+    for. Without ``community.docker`` installed the re-run fails at resolution
+    and names the missing collection. With it installed, the re-run gets past
+    resolution and fails at task execution instead (the fixture passes no
+    image and no daemon is assumed) — a different failure, but still not the
+    one the swap was there to fix, and the swap remains what removed it.
     """
+    from tests.conftest import replacement_resolves
+
+    converges = replacement_resolves()
     before = subprocess.run(
         ["ansible-playbook", "-i", "ansible/inventory.yml",
          "ansible/playbooks/module.yml"],
@@ -315,7 +320,11 @@ def test_agent_rewrites_a_removed_module_against_real_ansible(real_repo):
         cwd=real_repo, capture_output=True, text=True, check=False)
     combined = after.stdout + after.stderr
     assert "ansible.builtin.docker" not in combined, combined
-    assert "community.docker.docker_container" in combined, combined
+    if converges:
+        assert after.returncode != 0, combined
+        assert "couldn't resolve module/action" not in combined, combined
+    else:
+        assert "community.docker.docker_container" in combined, combined
 
 
 def test_a_module_swap_that_cannot_converge_stops_instead_of_looping(real_repo):
@@ -323,13 +332,27 @@ def test_a_module_swap_that_cannot_converge_stops_instead_of_looping(real_repo):
 
     Re-proposing the same swap for three iterations would burn the retry budget
     and write three identical commits. Two productive iterations — the swap,
-    then declaring the replacement's collection — and then stop.
+    then declaring the replacement's collection — and then stop. With the
+    collection already installed there is no declaration to make: the swap
+    genuinely fixes the seeded resolution failure and the run stops on the
+    next thing it finds — the fixture's container task is not runnable (no
+    image, no daemon), an unclassified failure with no rule — reported
+    rather than looped over or self-certified.
     """
+    from tests.conftest import replacement_resolves
+
+    converges = replacement_resolves()
     result = heal(playbook="ansible/playbooks/module.yml", max_retries=3,
                   use_llm=False)
-    assert not result.success
+    assert not result.success, (
+        f"the fixture's container task cannot honestly go green: "
+        f"declined={result.declined}")
     assert result.iterations <= 2, f"looped {result.iterations} times on a stuck fix"
-    assert any("is declared in" in d for d in result.declined), result.declined
+    if converges:
+        assert not any("is declared in" in d for d in result.declined), (
+            result.declined)
+    else:
+        assert any("is declared in" in d for d in result.declined), result.declined
 
 
 def test_dry_run_against_real_ansible_writes_nothing(real_repo):
