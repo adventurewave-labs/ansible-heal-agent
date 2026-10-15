@@ -291,6 +291,29 @@ _NO_INVENTORY_RE = re.compile(
     r"|Failed to parse .*with .* plugin"
     r"|skipping inventory source", re.I)
 
+#: ansible-core's own words when it refuses the repository's ansible.cfg
+#: because the directory is world-writable. An answer produced under this
+#: warning came from ansible's *default* inventory (or the environment), not
+#: from the cfg the repository configures — on a machine with a populated
+#: /etc/ansible/hosts those are unrelated hosts, and accepting them as this
+#: repository's complete host list would ground the rename decision in the
+#: wrong inventory. The explicit retry exists for exactly this case.
+_CFG_IGNORED_RE = re.compile(
+    r"world writable directory.*ignoring it as an ansible\.cfg source", re.I)
+
+
+def _unwrap(text: str) -> str:
+    """Collapse all whitespace to single spaces.
+
+    ansible-core word-wraps its warnings to the terminal width, and a long
+    repository path splits the very phrases these regexes key on across
+    lines — "with yaml\\nplugin:", "as an inventory\\nsource" — where ``.``
+    does not match the newline. CI's long checkout paths hit this for real:
+    a partially parsed inventory was accepted as a complete host list. Every
+    match against probe output goes through here first.
+    """
+    return re.sub(r"\s+", " ", text)
+
 
 #: True when the operator has asked the agent to commit to this repository, so
 #: running that repository's own inventory code is no more than ansible-playbook
@@ -367,14 +390,31 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
     # convention this agent uses, because ansible's own default is
     # /etc/ansible/hosts and it would otherwise see nothing at all.
     argv = [exe, "--list"]
+    configured: list[str] = []
     try:
         from pipeline.runner import configured_inventory_sources, inventory_path
-        if not configured_inventory_sources():
+        configured = configured_inventory_sources()
+        if not configured:
             inv = inventory_path()
             if inv.is_file():
                 argv.extend(["-i", str(inv)])
     except Exception:
         pass
+    def _hosts_from(proc: subprocess.CompletedProcess) -> set[str] | None:
+        """The host set an accepted probe run reported, if any."""
+        try:
+            data = json.loads(proc.stdout[proc.stdout.index("{"):])
+        except (ValueError, json.JSONDecodeError):
+            return None
+        meta = data.get("_meta", {}).get("hostvars", {})
+        hosts = {str(h) for h in meta}
+        for key, value in data.items():
+            if key == "_meta" or not isinstance(value, dict):
+                continue
+            hosts.update(str(h) for h in value.get("hosts", []) or [])
+        hosts.discard("localhost")
+        return hosts or None
+
     try:
         proc = _run_probe(
             argv, cwd=str(repo_root()), stdout=subprocess.PIPE,
@@ -384,22 +424,53 @@ def inventory_hosts_from_ansible(trust_repo: bool) -> set[str] | None:
         return None
     if proc.returncode != 0:
         return None
-    if _NO_INVENTORY_RE.search(proc.stdout + proc.stderr):
-        # A source did not parse, so this is a partial view of the hosts. A
-        # partial view is not grounds for deleting one of them.
+    combined_io = _unwrap(proc.stdout + proc.stderr)
+    # ansible-core ignored this repository's ansible.cfg (a world-writable
+    # directory), so whatever it parsed came from its default inventory or
+    # the environment — never from the sources the repository names. Not
+    # this repository's host list; the fallback below answers that question.
+    # Only when the attempt actually relied on that cfg: with no configured
+    # sources it carried the conventional inventory explicitly, and that
+    # answer never depended on the cfg ansible-core ignored — discarding it
+    # would turn a world-writable checkout with an inventory-less cfg into
+    # an unanswerable one.
+    cfg_was_ignored = bool(configured) and bool(
+        _CFG_IGNORED_RE.search(combined_io))
+    if not cfg_was_ignored:
+        if _NO_INVENTORY_RE.search(combined_io):
+            # A source did not parse, so this is a partial view of the hosts.
+            # A partial view is not grounds for deleting one of them.
+            return None
+        return _hosts_from(proc)
+
+    # Fallback, only for the condition it exists to recover — ansible-core
+    # refused the repository's ansible.cfg, so the first attempt could not
+    # have used it: hand ansible-core that cfg's own sources explicitly.
+    # Passing every configured source — never one guessed file, see
+    # ansible_resolves() for how that went — is the same view a run from
+    # outside that directory would get. Each source gets its own -i: a
+    # comma-joined value is ambiguous with ansible's inline host-list
+    # syntax, and one segment must not poison the rest. Static sources
+    # only: an executable script or plugin config is code the repository
+    # supplies and dry-run does not execute it, so a view that cannot be
+    # completed is declined, not widened.
+    if not configured or _unparseable_sources_configured():
         return None
+    retry = [exe, "--list"]
+    for source in configured:
+        retry.extend(["-i", str(repo_root() / source)])
     try:
-        data = json.loads(proc.stdout[proc.stdout.index("{"):])
-    except (ValueError, json.JSONDecodeError):
+        proc = _run_probe(
+            retry, cwd=str(repo_root()), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=60, env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
         return None
-    meta = data.get("_meta", {}).get("hostvars", {})
-    hosts = {str(h) for h in meta}
-    for key, value in data.items():
-        if key == "_meta" or not isinstance(value, dict):
-            continue
-        hosts.update(str(h) for h in value.get("hosts", []) or [])
-    hosts.discard("localhost")
-    return hosts or None
+    if proc.returncode != 0:
+        return None
+    if _NO_INVENTORY_RE.search(_unwrap(proc.stdout + proc.stderr)):
+        return None
+    return _hosts_from(proc)
 
 
 def ansible_resolves(pattern: str) -> bool | None:
@@ -467,10 +538,10 @@ def ansible_resolves(pattern: str) -> bool | None:
             return None
         if proc.returncode != 0:
             continue
-        match = re.search(r"hosts \((\d+)\)", proc.stdout)
+        match = re.search(r"hosts \((\d+)\)", _unwrap(proc.stdout))
         if match is None:
             continue
-        combined = proc.stdout + proc.stderr
+        combined = _unwrap(proc.stdout + proc.stderr)
         if _unparseable_sources_configured():
             # The probe deliberately runs without the script, auto and
             # constructed plugins, because those execute code the target repo
@@ -710,8 +781,12 @@ def _diagnose_host(failure: dict) -> dict[str, Any]:
         return _no_fix(
             "the agent could not get a complete host list from ansible-core "
             "for this repository, so it can see only part of your inventory "
-            "and will not rename anything in it. Install ansible-core, or run "
-            "in apply mode if this repository's inventory plugins are yours to "
+            "and will not rename anything in it. Either ansible-core is not "
+            "installed, or it could not read the inventory this repository "
+            "configures: dry-run never executes the repository's own "
+            "inventory sources, and ansible-core itself refuses an "
+            "ansible.cfg kept in a world-writable directory. Run in apply "
+            "mode if this repository's inventory plugins are yours to "
             "execute", failure.get("type", "other"))
     if str(expected) in known:
         return _no_fix(
@@ -1198,7 +1273,10 @@ def _guard_inventory_fix(failure: dict, diagnosis: dict[str, Any]) -> dict[str, 
     if known is None:
         return _no_fix(
             "the agent could not get a complete host list from ansible-core, "
-            "so it will not rename anything in this inventory",
+            "so it will not rename anything in this inventory. Either "
+            "ansible-core is not installed, or it could not read the "
+            "inventory this repository configures (dry-run never executes "
+            "the repository's own inventory sources)",
             failure.get("type", "other"))
     if str(as_written) in known:
         return _no_fix(

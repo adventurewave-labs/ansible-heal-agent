@@ -110,6 +110,12 @@ inspecting filenames, suffixes and exec bits, and *every* such predicate was
 defeated by an ordinary spelling it had not enumerated. Enumerating spellings
 does not converge. Asking ansible-core does.
 
+When ansible-core itself refuses the repository's `ansible.cfg` — it ignores
+one kept in a world-writable directory, which is the state of every checkout
+under `/tmp` in a CI sandbox — the probe hands that cfg's own static sources
+to the binary explicitly rather than decline on a config it just watched
+being ignored; a source that would execute repository code is never passed.
+
 In `apply` and PR modes the repository's own inventory plugins run, because the
 operator has pointed the agent at their repository and asked it to commit
 there — that is no more than `ansible-playbook` would do. In `--dry-run`, the

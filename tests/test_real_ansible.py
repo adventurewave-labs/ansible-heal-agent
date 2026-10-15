@@ -374,6 +374,189 @@ def test_dry_run_against_real_ansible_writes_nothing(real_repo):
     assert (real_repo / "ansible" / "inventory.yml").read_text() == before
 
 
+def test_probe_recovers_when_ansible_cfg_sits_in_a_world_writable_dir(
+        scratch_repo):
+    """ansible-core refuses to load an ansible.cfg kept in a world-writable
+    directory — the state of every repository checked out under /tmp in a CI
+    sandbox. The restricted probe's first attempt relies on the binary reading
+    that cfg, so it parses no inventory at all and this used to return
+    "unknown", declining the rename on a message that blamed a missing
+    ansible-core (issue #20). The retry hands the cfg's own static sources to
+    the binary explicitly and recovers the complete host list — without
+    executing anything the repository supplies."""
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/inventory.yml\n")
+
+    scratch_repo.chmod(0o777)
+    try:
+        hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    finally:
+        scratch_repo.chmod(0o755)
+
+    assert hosts is not None, (
+        "the probe did not recover the host list behind a world-writable "
+        "ansible.cfg")
+    assert "web-01" in hosts
+
+
+def test_probe_recovery_covers_every_configured_source(scratch_repo):
+    """The retry passes each cfg-configured source as its own ``-i``. A
+    comma-joined value would be ambiguous with ansible's inline host-list
+    syntax — a filename could surface as a host — so the two-source case
+    asserts the exact combined host set: both files' hosts, and nothing
+    else, behind the same world-writable cfg the recovery exists for."""
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/primary.yml,ansible/secondary.yml\n")
+    _write(scratch_repo, "ansible/primary.yml", """
+        all:
+          hosts:
+            web-01:
+    """)
+    _write(scratch_repo, "ansible/secondary.yml", """
+        all:
+          hosts:
+            extra-09:
+    """)
+
+    scratch_repo.chmod(0o777)
+    try:
+        hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    finally:
+        scratch_repo.chmod(0o755)
+
+    assert hosts == {"web-01", "extra-09"}, (
+        "expected exactly both files' hosts and nothing else — a filename "
+        f"surfacing as a host means the sources were comma-joined: {hosts}")
+
+
+def test_probe_recovery_refuses_a_partial_view(scratch_repo):
+    """One valid source and one malformed source, both configured, behind a
+    world-writable cfg: ansible-core answers with the hosts of the file that
+    parses and a warning about the one that does not. That is a partial view
+    of the configured inventory, and recovery must refuse it (None) — "the
+    hosts I can see" is not "the hosts that exist", and a rename must never
+    be decided on the first."""
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/primary.yml,ansible/broken.yml\n")
+    _write(scratch_repo, "ansible/primary.yml", """
+        all:
+          hosts:
+            web-01:
+    """)
+    _write(scratch_repo, "ansible/broken.yml", "\tthis: is: not: valid: yaml:\n")
+
+    scratch_repo.chmod(0o777)
+    try:
+        hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    finally:
+        scratch_repo.chmod(0o755)
+
+    assert hosts is None, (
+        "a partially parsed inventory must not be presented as a complete "
+        f"host list: {hosts}")
+
+
+def test_probe_distrusts_answers_from_behind_an_ignored_cfg(
+        scratch_repo, monkeypatch):
+    """When ansible-core ignores the repository's ansible.cfg — a
+    world-writable directory — an answer that still came back, from a
+    populated default inventory on that machine, is not this repository's
+    host list. The probe must skip it and take the explicit retry's answer.
+
+    The default-inventory fallback cannot be staged for real without
+    writing /etc, so the two probe invocations are simulated: the first
+    answers with a decoy host behind the cfg-ignored warning, the second
+    (the retry carrying the cfg's own sources) with the repository's host.
+    """
+    import subprocess as sp
+
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/inventory.yml\n")
+
+    calls: list[list[str]] = []
+
+    def fake_run_probe(argv, **kwargs):
+        calls.append(argv)
+        if "-i" not in argv:
+            return sp.CompletedProcess(
+                argv, 0,
+                '{"_meta": {"hostvars": {"decoy-from-default": {}}}}',
+                "[WARNING]: Ansible is being run in a world writable "
+                "directory (/tmp/x), ignoring it as an ansible.cfg source.")
+        return sp.CompletedProcess(
+            argv, 0, '{"_meta": {"hostvars": {"web-01": {}}}}', "")
+
+    monkeypatch.setattr(diagnoser, "_run_probe", fake_run_probe)
+
+    hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    assert hosts == {"web-01"}, (
+        "an answer produced behind an ignored ansible.cfg must not be "
+        f"accepted as this repository's host list: {hosts}")
+    assert len(calls) == 2 and "-i" in calls[1], (
+        "expected the probe to fall through to the explicit retry")
+
+
+def test_probe_markers_survive_ansible_word_wrapping(
+        scratch_repo, monkeypatch):
+    """ansible-core word-wraps its warnings to the terminal width, and a long
+    repository path splits the no-inventory phrases across lines — "with
+    yaml\\nplugin:", "as an inventory\\nsource" — where the probe's regexes
+    must still recognise them. CI's long checkout paths hit this for real
+    against ansible-core 2.17: a partially parsed inventory was accepted as
+    a complete host list."""
+    import subprocess as sp
+
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\ninventory = ansible/primary.yml,ansible/broken.yml\n")
+
+    long_dir = "/very/" + "long/" * 30 + "path"
+
+    def fake_run_probe(argv, **kwargs):
+        return sp.CompletedProcess(
+            argv, 0, '{"_meta": {"hostvars": {"web-01": {}}}}',
+            f"[WARNING]:  * Failed to parse {long_dir}/broken.yml with yaml\n"
+            "plugin: We were unable to read either as JSON nor YAML")
+
+    monkeypatch.setattr(diagnoser, "_run_probe", fake_run_probe)
+
+    hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    assert hosts is None, f"a word-wrapped warning went unrecognised: {hosts}"
+
+
+def test_probe_still_answers_when_the_cfg_names_no_inventory(scratch_repo):
+    """A world-writable checkout whose ansible.cfg sets no inventory: the
+    first probe attempt carries the conventional inventory file explicitly,
+    so its answer never depended on the cfg ansible-core ignored — and must
+    not be discarded in the blanket distrust of answers from behind that
+    warning. Regression from a review round: it was, and the checkout
+    became unanswerable."""
+    from agent import diagnoser
+
+    _write(scratch_repo, "ansible.cfg",
+           "[defaults]\nretry_files_enabled = False\n")
+
+    scratch_repo.chmod(0o777)
+    try:
+        hosts = diagnoser.inventory_hosts_from_ansible(trust_repo=False)
+    finally:
+        scratch_repo.chmod(0o755)
+
+    assert hosts is not None, (
+        "an explicit-convention answer was discarded although it never "
+        "relied on the ignored ansible.cfg")
+    assert "web-01" in hosts
+
+
 # ── configuration errors ─────────────────────────────────────────────
 
 def test_requesting_the_real_runner_without_ansible_is_an_error(
