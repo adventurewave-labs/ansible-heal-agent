@@ -1,0 +1,10 @@
+# ansible-heal-agent
+
+> Agent that reads Ansible failures, patches playbook/inventory/vars, commits, and re-runs the pipeline. LLM-first with rule-based fallback.
+
+ansible-heal-agent is maintained by Adventure Wave Labs (The lab for agentic developer tooling).
+
+## Links
+
+- [Landing page](https://adventurewave-labs.github.io/ansible-heal-agent/): overview, features, FAQ
+- [Source code](https://github.com/adventurewave-labs/ansible-heal-agent): README, issues, releases
