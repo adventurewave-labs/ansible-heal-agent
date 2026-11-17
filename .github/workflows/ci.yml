@@ -110,6 +110,52 @@ jobs:
             exit 1
           fi
 
+  bare-env:
+    # Release-validation audit (2026-11-16/17): the git-refusal tests — above
+    # all test_a_commit_git_refuses_is_reported_not_counted — fail on macOS
+    # dev boxes yet pass on a clean Linux box (findings/ansible-heal-agent.md,
+    # pass-2: full suite green on clean Linux with ansible-core installed).
+    # This leg pins that guarantee in CI: a bare python:3.12-slim container
+    # with nothing pre-installed must run the git-refusal tests plus a smoke
+    # subset green. Blocking on purpose — a healthy repo is green on clean
+    # Linux; no continue-on-error here.
+    name: bare container (python:3.12-slim)
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.12-slim
+    steps:
+      - uses: actions/checkout@v4
+      # git is REQUIRED: the git-refusal tests exercise real git behaviour
+      # (init, commit, pre-commit hooks) in scratch repositories, and the
+      # slim image ships without it. (Without git, actions/checkout falls
+      # back to a REST-API tarball download — no .git — which is fine: the
+      # autouse checkout-isolation guard skips when .git is absent, and every
+      # fixture here works in its own freshly git-init'ed scratch repo.)
+      - name: Install git
+        run: apt-get update && apt-get install -y --no-install-recommends git
+      # The repo's declared install path (Makefile `make install`):
+      # requirements.txt carries the dependencies including ansible-core,
+      # the documented hard dependency; the editable install puts the
+      # `ansible-heal` console script on PATH. This reproduces the audit's
+      # green condition (ansible-core present, otherwise bare Linux).
+      - name: Install via the repo's declared path
+        run: pip install -r requirements.txt && pip install -e .
+      - name: Configure a git identity for the scratch-repo fixtures
+        run: |
+          git config --global user.email "ci@ansible-heal.invalid"
+          git config --global user.name "CI"
+      # Scoped run: the git-state refusal tests (including the audit's
+      # env-sensitive test_a_commit_git_refuses_is_reported_not_counted),
+      # then a quick hermetic smoke subset. The full suite stays with the
+      # `test` legs; this leg exists to catch environment-sensitivity.
+      - name: Git-refusal tests must pass on a bare Linux environment
+        run: |
+          python -m pytest -q tests/test_destructive_inputs.py \
+            -k "git_refuses or merge_in_progress or detached_head"
+      - name: Smoke subset (hermetic modules)
+        run: |
+          python -m pytest -q tests/test_config.py tests/test_structured_output.py
+
   demo:
     name: end-to-end demo
     runs-on: ubuntu-latest
